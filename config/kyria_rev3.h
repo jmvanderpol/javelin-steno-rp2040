@@ -1,14 +1,8 @@
 //---------------------------------------------------------------------------
 
 #pragma once
-#include <stddef.h>
-#include <stdint.h>
-
-//---------------------------------------------------------------------------
-
-struct StenoConfigBlock;
-struct StenoOrthography;
-struct StenoDictionaryCollection;
+#include "encoder_pins.h"
+#include "main_flash_layout.h"
 
 //---------------------------------------------------------------------------
 
@@ -23,32 +17,32 @@ struct StenoDictionaryCollection;
 #define JAVELIN_USE_RGB_MAP 1
 
 #define JAVELIN_SPLIT 1
+#define JAVELIN_SPLIT_PIO_CYCLES 16
 #define JAVELIN_SPLIT_TX_PIN 1
 #define JAVELIN_SPLIT_RX_PIN 1
 #define JAVELIN_SPLIT_IS_MASTER 1
 #define JAVELIN_SPLIT_SIDE_PIN 9
 #define JAVELIN_SPLIT_TX_RX_BUFFER_SIZE 512
 
-#define JAVELIN_OLED_DRIVER 1306
+#define JAVELIN_DISPLAY_DRIVER 1306
 #define JAVELIN_OLED_WIDTH 128
 #define JAVELIN_OLED_HEIGHT 64
 #define JAVELIN_DISPLAY_WIDTH 128
 #define JAVELIN_DISPLAY_HEIGHT 64
 #define JAVELIN_OLED_I2C i2c1
+#define JAVELIN_OLED_TX_DMA I2C1_TX
 #define JAVELIN_OLED_SDA_PIN 2
 #define JAVELIN_OLED_SCL_PIN 3
 #define JAVELIN_OLED_I2C_ADDRESS 0x3c
 #define JAVELIN_OLED_ROTATION 180
 
+#define JAVELIN_BUTTON_MATRIX 1
+
 constexpr uint8_t LEFT_COLUMN_PINS[] = {8, 27, 26, 22, 20, 23, 21};
-constexpr uint32_t LEFT_COLUMN_PIN_MASK = 0x0cf00100;
 constexpr uint8_t LEFT_ROW_PINS[] = {4, 5, 6, 7};
-constexpr uint32_t LEFT_ROW_PIN_MASK = 0x000000f0;
 
 constexpr uint8_t RIGHT_COLUMN_PINS[] = {23, 4, 5, 6, 7, 8, 21};
-constexpr uint32_t RIGHT_COLUMN_PIN_MASK = 0x00a001f0;
 constexpr uint8_t RIGHT_ROW_PINS[] = {27, 26, 22, 20};
-constexpr uint32_t RIGHT_ROW_PIN_MASK = 0x0c500000;
 
 // clang-format off
 //
@@ -104,21 +98,17 @@ constexpr uint8_t RGB_MAP[62] = {
 
 // clang-format on
 
-const StenoConfigBlock *const STENO_CONFIG_BLOCK_ADDRESS =
-    (const StenoConfigBlock *)0x10040000;
-const uint8_t *const BUTTON_MANAGER_BYTE_CODE = (const uint8_t *)0x10040100;
-const StenoOrthography *const ORTHOGRAPHY_ADDRESS =
-    (const StenoOrthography *)0x10042000;
-const uint8_t *const STENO_WORD_LIST_ADDRESS = (const uint8_t *)0x10044000;
-const StenoDictionaryCollection *const STENO_MAP_DICTIONARY_COLLECTION_ADDRESS =
-    (const StenoDictionaryCollection *)0x10400000;
-const uint8_t *const STENO_USER_DICTIONARY_ADDRESS =
-    (const uint8_t *)0x10fc0000;
-const size_t STENO_USER_DICTIONARY_SIZE = 0x40000;
+#define JAVELIN_SCRIPT_CONFIGURATION                                           \
+  R"({"name":"Kyria","layout":[{"x":0,"y":0.9},{"x":1,"y":0.9},{"x":2,"y":0.35},{"x":3,"y":0},{"x":4,"y":0.35},{"x":5,"y":0.5},{"x":12,"y":0.5},{"x":13,"y":0.35},{"x":14,"y":0},{"x":15,"y":0.35},{"x":16,"y":0.9},{"x":17,"y":0.9},{"x":0,"y":1.9},{"x":1,"y":1.9},{"x":2,"y":1.35},{"x":3,"y":1},{"x":4,"y":1.35},{"x":5,"y":1.5},{"x":12,"y":1.5},{"x":13,"y":1.35},{"x":14,"y":1},{"x":15,"y":1.35},{"x":16,"y":1.9},{"x":17,"y":1.9},{"x":0,"y":2.9},{"x":1,"y":2.9},{"x":2,"y":2.35},{"x":3,"y":2},{"x":4,"y":2.35},{"x":5,"y":2.5},{"x":6.12,"y":3.13,"r":0.52},{"x":7.21,"y":3.99,"r":0.79},{"x":9.79,"y":3.99,"r":-0.79},{"x":10.88,"y":3.13,"r":-0.52},{"x":12,"y":2.5},{"x":13,"y":2.35},{"x":14,"y":2},{"x":15,"y":2.35},{"x":16,"y":2.9},{"x":17,"y":2.9},{"x":2.5,"y":3.4},{"x":3.5,"y":3.4},{"x":4.6,"y":3.55,"r":0.26},{"x":5.62,"y":4,"r":0.52},{"x":6.5,"y":4.7,"r":0.79},{"x":10.5,"y":4.7,"r":-0.79},{"x":11.38,"y":4,"r":-0.52},{"x":12.4,"y":3.55,"r":-0.26},{"x":13.5,"y":3.4},{"x":14.5,"y":3.4}]})"
 
-const size_t MAXIMUM_MAP_DICTIONARY_SIZE = 0xbc0000;
-const size_t MAXIMUM_BUTTON_SCRIPT_SIZE = 0x1f00;
 const size_t BUTTON_COUNT = 50;
+
+#define JAVELIN_ENCODER 1
+#define JAVELIN_ENCODER_COUNT 2
+#define JAVELIN_ENCODER_LEFT_COUNT 1
+#define JAVELIN_ENCODER_SPEED 2
+
+constexpr EncoderPins ENCODER_PINS[] = {{29, 28}, {29, 28}};
 
 const char *const MANUFACTURER_NAME = "splitkb";
 const char *const PRODUCT_NAME = "Kyria (Javelin)";

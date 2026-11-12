@@ -1,12 +1,8 @@
 //---------------------------------------------------------------------------
 
 #pragma once
-#include <stddef.h>
-#include <stdint.h>
-
-//---------------------------------------------------------------------------
-
-struct StenoConfigBlock;
+#include "encoder_pins.h"
+#include "pair_flash_layout.h"
 
 //---------------------------------------------------------------------------
 
@@ -21,32 +17,32 @@ struct StenoConfigBlock;
 #define JAVELIN_USE_RGB_MAP 1
 
 #define JAVELIN_SPLIT 1
+#define JAVELIN_SPLIT_PIO_CYCLES 16
 #define JAVELIN_SPLIT_TX_PIN 1
 #define JAVELIN_SPLIT_RX_PIN 1
 #define JAVELIN_SPLIT_IS_MASTER 0
 #define JAVELIN_SPLIT_SIDE_PIN 9
 #define JAVELIN_SPLIT_TX_RX_BUFFER_SIZE 512
 
-#define JAVELIN_OLED_DRIVER 1306
+#define JAVELIN_DISPLAY_DRIVER 1306
 #define JAVELIN_OLED_WIDTH 128
 #define JAVELIN_OLED_HEIGHT 64
 #define JAVELIN_DISPLAY_WIDTH 128
 #define JAVELIN_DISPLAY_HEIGHT 64
 #define JAVELIN_OLED_I2C i2c1
+#define JAVELIN_OLED_TX_DMA I2C1_TX
 #define JAVELIN_OLED_SDA_PIN 2
 #define JAVELIN_OLED_SCL_PIN 3
 #define JAVELIN_OLED_I2C_ADDRESS 0x3c
 #define JAVELIN_OLED_ROTATION 180
 
+#define JAVELIN_BUTTON_MATRIX 1
+
 constexpr uint8_t LEFT_COLUMN_PINS[] = {8, 27, 26, 22, 20, 23, 21};
-constexpr uint32_t LEFT_COLUMN_PIN_MASK = 0x0cf00100;
 constexpr uint8_t LEFT_ROW_PINS[] = {4, 5, 6, 7};
-constexpr uint32_t LEFT_ROW_PIN_MASK = 0x000000f0;
 
 constexpr uint8_t RIGHT_COLUMN_PINS[] = {23, 4, 5, 6, 7, 8, 21};
-constexpr uint32_t RIGHT_COLUMN_PIN_MASK = 0x00a001f0;
 constexpr uint8_t RIGHT_ROW_PINS[] = {27, 26, 22, 20};
-constexpr uint32_t RIGHT_ROW_PIN_MASK = 0x0c500000;
 
 // clang-format off
 //
@@ -102,12 +98,14 @@ constexpr uint8_t RGB_MAP[62] = {
 
 // clang-format on
 
-const StenoConfigBlock *const STENO_CONFIG_BLOCK_ADDRESS =
-    (const StenoConfigBlock *)0x10040000;
-const uint8_t *const BUTTON_MANAGER_BYTE_CODE = (const uint8_t *)0x10040100;
-
-const size_t MAXIMUM_BUTTON_SCRIPT_SIZE = 0x1f00;
 const size_t BUTTON_COUNT = 50;
+
+#define JAVELIN_ENCODER 1
+#define JAVELIN_ENCODER_COUNT 2
+#define JAVELIN_ENCODER_LEFT_COUNT 1
+#define JAVELIN_ENCODER_SPEED 2
+
+constexpr EncoderPins ENCODER_PINS[] = {{29, 28}, {29, 28}};
 
 const char *const MANUFACTURER_NAME = "splitkb";
 const char *const PRODUCT_NAME = "Kyria (Javelin)";

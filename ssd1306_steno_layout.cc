@@ -11,7 +11,7 @@ struct StenoLayoutData {
 
 //---------------------------------------------------------------------------
 
-#if JAVELIN_OLED_DRIVER == 1306
+#if JAVELIN_DISPLAY_DRIVER == 1306
 
 //---------------------------------------------------------------------------
 
@@ -113,7 +113,7 @@ void Ssd1306::Ssd1306Data::DrawStenoLayout(StenoStroke stroke) {
   Clear();
 
   for (size_t i = 0; i < sizeof(LAYOUT_DATA) / sizeof(*LAYOUT_DATA); ++i) {
-    int x = LAYOUT_DATA[i].x;
+    const int x = LAYOUT_DATA[i].x;
     if (stroke.GetKeyState() & (1 << i)) {
       // On
       switch (LAYOUT_DATA[i].type) {
@@ -219,6 +219,6 @@ void Ssd1306::Ssd1306Data::DrawStenoLayout(StenoStroke stroke) {
 
 //---------------------------------------------------------------------------
 
-#endif // JAVELIN_OLED_DRIVER == 1306
+#endif // JAVELIN_DISPLAY_DRIVER == 1306
 
 //---------------------------------------------------------------------------

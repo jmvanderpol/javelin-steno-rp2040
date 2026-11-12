@@ -4,14 +4,16 @@
 //
 //---------------------------------------------------------------------------
 
+#include <unistd.h>
+
 extern "C" {
 
 //---------------------------------------------------------------------------
 
-__attribute__((weak)) void _close(void) {}
-__attribute__((weak)) void _fstat(void) {}
-__attribute__((weak)) void _isatty(void) {}
-__attribute__((weak)) void _lseek(void) {}
+int _close(int) { return 0; }
+int _fstat(int, struct stat *) { return 0; }
+int _isatty(int) { return 0; }
+int _lseek(int, off_t, int) { return 0; }
 
 //---------------------------------------------------------------------------
 }

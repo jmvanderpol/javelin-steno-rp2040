@@ -32,7 +32,7 @@ protected:
   HidReportBufferBase(uint8_t entrySize, uint8_t instanceNumber)
       : entrySize(entrySize), instanceNumber(instanceNumber) {}
 
-  static const size_t NUMBER_OF_ENTRIES = 16;
+  static constexpr size_t NUMBER_OF_ENTRIES = 16;
 
 private:
   const uint8_t entrySize;
@@ -49,6 +49,8 @@ private:
   Entry *GetEntry(size_t index) {
     return (Entry *)(entryData + entrySize * index);
   }
+
+  void PumpUntilNotFull();
 
 public:
   uint8_t entryData[0];

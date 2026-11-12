@@ -1,37 +1,46 @@
 //---------------------------------------------------------------------------
 
+#include "pico_serial_port.h"
 #include JAVELIN_BOARD_CONFIG
 
 #include "console_report_buffer.h"
-#include "hid_keyboard_report_builder.h"
+#include "javelin/button_script_manager.h"
 #include "javelin/console_input_buffer.h"
-#include "javelin/debounce.h"
-#include "javelin/flash.h"
-#include "javelin/hal/bootloader.h"
-#include "javelin/key.h"
 #include "javelin/keyboard_led_status.h"
+#include "javelin/split/split_console.h"
+#include "javelin/split/split_midi.h"
 #include "javelin/split/split_serial_buffer.h"
 #include "javelin/split/split_usb_status.h"
+#include "javelin/split/split_version.h"
 #include "javelin/static_allocate.h"
-#include "javelin/timer_manager.h"
+#include "main_report_builder.h"
+#include "main_task.h"
+#include "pico_button_state.h"
+#include "pico_crc32.h"
+#include "pico_encoder_state.h"
+#include "pico_midi.h"
+#include "pico_split.h"
+#include "pico_timer.h"
+#include "pico_ws2812.h"
+#include "pinnacle.h"
 #include "plover_hid_report_buffer.h"
-#include "rp2040_button_state.h"
-#include "rp2040_crc.h"
-#include "rp2040_split.h"
-#include "rp2040_ws2812.h"
 #include "split_hid_report_buffer.h"
 #include "ssd1306.h"
+#include "st7789.h"
 #include "usb_descriptors.h"
 
 #include <hardware/watchdog.h>
-#include <pico/time.h>
 #include <tusb.h>
+
+#if defined(CONFIG_EXTRA_SOURCE)
+#include CONFIG_EXTRA_SOURCE
+#endif
 
 //---------------------------------------------------------------------------
 
 void InitJavelinMaster();
 void InitJavelinSlave();
-void ProcessStenoTick();
+void FlushBuffers();
 void InitMulticore();
 
 //---------------------------------------------------------------------------
@@ -48,17 +57,17 @@ extern uint32_t watchdogData[8];
 extern "C" void tud_mount_cb(void) {
   ConsoleReportBuffer::instance.Reset();
   PloverHidReportBuffer::instance.Reset();
-  HidKeyboardReportBuilder::instance.Reset();
+  MainReportBuilder::instance.Reset();
   SplitUsbStatus::instance.OnMount();
   SplitUsbStatus::instance.SetPowered(true);
-  ButtonManager::ExecuteScript(ScriptId::CONNECTION_UPDATE);
+  ButtonScriptManager::ExecuteScript(ButtonScriptId::CONNECTION_UPDATE);
 }
 
 // Invoked when device is unmounted
 extern "C" void tud_umount_cb(void) {
   SplitUsbStatus::instance.OnUnmount();
   SplitUsbStatus::instance.SetPowered(false);
-  ButtonManager::ExecuteScript(ScriptId::CONNECTION_UPDATE);
+  ButtonScriptManager::ExecuteScript(ButtonScriptId::CONNECTION_UPDATE);
 }
 
 // Invoked when usb bus is suspended
@@ -67,117 +76,19 @@ extern "C" void tud_umount_cb(void) {
 extern "C" void tud_suspend_cb(bool remoteWakeupEnabled) {
   // set_sys_clock_khz(25000, true);
   SplitUsbStatus::instance.OnSuspend();
+  ButtonScriptManager::ExecuteScript(ButtonScriptId::CONNECTION_UPDATE);
 }
 
 // Invoked when usb bus is resumed
 extern "C" void tud_resume_cb(void) {
   // set_sys_clock_khz(125000, true);
   SplitUsbStatus::instance.OnResume();
+  ButtonScriptManager::ExecuteScript(ButtonScriptId::CONNECTION_UPDATE);
 }
 
 //---------------------------------------------------------------------------
 // USB HID
 //---------------------------------------------------------------------------
-
-#if JAVELIN_SPLIT
-class MasterTask final : public SplitRxHandler {
-#else
-class MasterTask {
-#endif
-public:
-  void Update();
-
-private:
-#if JAVELIN_SPLIT
-  ButtonState splitState;
-#endif
-  GlobalDeferredDebounce<ButtonState> debouncer;
-
-#if JAVELIN_SPLIT
-  virtual void OnReceiveConnectionReset() { splitState.ClearAll(); }
-  virtual void OnDataReceived(const void *data, size_t length) {
-    const ButtonState &newSplitState = *(const ButtonState *)data;
-    splitState = newSplitState;
-  }
-#endif
-};
-
-void MasterTask::Update() {
-  if (Flash::IsUpdating()) {
-    return;
-  }
-
-  uint32_t scriptTime = Clock::GetMilliseconds();
-  ButtonManager::GetInstance().Tick(scriptTime);
-  TimerManager::instance.ProcessTimers(scriptTime);
-
-#if JAVELIN_SPLIT
-  Debounced<ButtonState> buttonState =
-      debouncer.Update(Rp2040ButtonState::Read() | splitState);
-#else
-  Debounced<ButtonState> buttonState =
-      debouncer.Update(Rp2040ButtonState::Read());
-#endif
-  if (!buttonState.isUpdated) {
-    return;
-  }
-
-  if (tud_suspended()) {
-    if (buttonState.value.IsAnySet()) {
-      // Wake up host if we are in suspend mode
-      // and REMOTE_WAKEUP feature is enabled by host
-      tud_remote_wakeup();
-    }
-  }
-
-  ButtonManager::GetInstance().Update(buttonState.value,
-                                      Clock::GetMilliseconds());
-}
-
-class SlaveTask final : public SplitTxHandler {
-public:
-  void Update();
-  void UpdateBuffer(TxBuffer &buffer);
-
-private:
-  bool needsTransmit = true;
-  ButtonState buttonState;
-
-  virtual void OnTransmitConnectionReset() { needsTransmit = true; }
-};
-
-void SlaveTask::Update() {
-  if (Flash::IsUpdating()) {
-    return;
-  }
-
-  uint32_t scriptTime = Clock::GetMilliseconds();
-  ButtonManager::GetInstance().Tick(scriptTime);
-  TimerManager::instance.ProcessTimers(scriptTime);
-
-  ButtonState newButtonState = Rp2040ButtonState::Read();
-  if (newButtonState == buttonState) {
-    return;
-  }
-
-  buttonState = newButtonState;
-  needsTransmit = true;
-
-  if (tud_suspended()) {
-    if (buttonState.IsAnySet()) {
-      // Wake up host if we are in suspend mode
-      // and REMOTE_WAKEUP feature is enabled by host
-      tud_remote_wakeup();
-    }
-  }
-}
-
-void SlaveTask::UpdateBuffer(TxBuffer &buffer) {
-  if (needsTransmit) {
-    needsTransmit = false;
-    buffer.Add(SplitHandlerId::KEY_STATE, &buttonState, sizeof(ButtonState));
-  }
-}
 
 // Invoked when received SET_PROTOCOL request
 // protocol is either HID_PROTOCOL_BOOT (0) or HID_PROTOCOL_REPORT (1)
@@ -191,7 +102,7 @@ extern "C" void tud_hid_report_complete_cb(uint8_t instance,
                                            uint16_t length) {
   switch (instance) {
   case ITF_NUM_KEYBOARD:
-    HidKeyboardReportBuilder::instance.SendNextReport();
+    MainReportBuilder::instance.SendNextReport();
     break;
   case ITF_NUM_PLOVER_HID:
     PloverHidReportBuffer::instance.SendNextReport();
@@ -219,11 +130,12 @@ extern "C" void tud_hid_set_report_cb(uint8_t instance, uint8_t reportId,
                                       uint16_t bufferSize) {
   switch (instance) {
   case ITF_NUM_KEYBOARD:
-    if (reportType != HID_REPORT_TYPE_OUTPUT || bufferSize < 2 ||
-        buffer[0] != KEYBOARD_PAGE_REPORT_ID) {
+    if (reportType != HID_REPORT_TYPE_OUTPUT ||
+        reportId != KEYBOARD_PAGE_REPORT_ID || bufferSize < 1) {
       return;
     }
-    KeyboardLedStatus::Set(*(KeyboardLedStatusValue *)&buffer[1]);
+    SplitUsbStatus::instance.SetKeyboardLedStatus(
+        *(KeyboardLedStatus *)&buffer[0]);
     break;
 
   case ITF_NUM_CONSOLE:
@@ -234,22 +146,40 @@ extern "C" void tud_hid_set_report_cb(uint8_t instance, uint8_t reportId,
 
 //---------------------------------------------------------------------------
 
-static void cdc_task() {
-  uint8_t itf;
+// By default, the system will run as fast as possible with 100us pauses.
+//
+// This interrupt handling is a fallback to catch key and encoder changes
+// while long-running processes occur.
 
-  for (itf = 0; itf < CFG_TUD_CDC; itf++) {
-    if (tud_cdc_n_available(itf)) {
-      uint8_t buf[64];
-      uint32_t count = tud_cdc_n_read(itf, buf, sizeof(buf));
-      // Do nothing with it.
-    }
-  }
+static void IrqHandler() {
+  PicoButtonState::SetInInterrupt(true);
+  PicoButtonState::Update();
+  PicoEncoderState::UpdateNoScriptCall();
+  PicoButtonState::SetInInterrupt(false);
+  timer->AcknowledgeAlarmInterrupt(0);
+  timer->SetAlarmAfterDelayInMicroseconds(0, 3'000);
 }
 
-//---------------------------------------------------------------------------
+static void InitializeInterruptUpdate() {
+#if JAVELIN_PICO_PLATFORM == 2350
+  irq_set_exclusive_handler(TIMER0_IRQ_0, IrqHandler);
+  irq_set_enabled(TIMER0_IRQ_0, true);
+#elif JAVELIN_PICO_PLATFORM == 2040
+  irq_set_exclusive_handler(TIMER_IRQ_0, IrqHandler);
+  irq_set_enabled(TIMER_IRQ_0, true);
+#else
+#error Unsupported platform
+#endif
+}
 
-JavelinStaticAllocate<MasterTask> masterTaskContainer;
-JavelinStaticAllocate<SlaveTask> slaveTaskContainer;
+static void StartInterruptUpdate() {
+  timer->EnableAlarmInterrupt(0);
+  timer->SetAlarmAfterDelayInMicroseconds(0, 3'000);
+}
+
+static void StopInterruptUpdate() { timer->DisableAlarmInterrupt(0); }
+
+//---------------------------------------------------------------------------
 
 void DoMasterRunLoop() {
 #if JAVELIN_USE_WATCHDOG
@@ -257,19 +187,26 @@ void DoMasterRunLoop() {
 #endif
 
   while (1) {
-    tud_task(); // tinyusb device task
-    masterTaskContainer->Update();
-    Rp2040Split::Update();
-    cdc_task();
+    PicoButtonState::Update();
+    StartInterruptUpdate();
 
-    ProcessStenoTick();
+    tud_task(); // tinyusb device task
+
+    MasterTask::container->Update();
+    PicoSplit::Update();
+    PicoSerialPort::HandleIncomingData();
+    PicoMidi::HandleIncomingData();
+
     ConsoleInputBuffer::Process();
     Ws2812::Update();
     Ssd1306::Update();
+    St7789::Update();
+    FlushBuffers();
 
 #if JAVELIN_USE_WATCHDOG
     watchdog_update();
 #endif
+    StopInterruptUpdate();
     sleep_us(100);
   }
 }
@@ -280,21 +217,29 @@ void DoSlaveRunLoop() {
 #endif
 
   while (1) {
+    PicoButtonState::Update();
+    StartInterruptUpdate();
+
     tud_task(); // tinyusb device task
-    slaveTaskContainer->Update();
-    Rp2040Split::Update();
-    cdc_task();
+
+    SlaveTask::container->Update();
+    PicoSplit::Update();
+    PicoSerialPort::HandleIncomingData();
+    PicoMidi::HandleIncomingData();
 
     SplitHidReportBuffer::Update();
-    HidKeyboardReportBuilder::instance.FlushIfRequired();
-    ConsoleReportBuffer::instance.Flush();
     ConsoleInputBuffer::Process();
     Ws2812::Update();
     Ssd1306::Update();
+    St7789::Update();
+    SplitConsole::Process();
+    PicoSerialPort::Flush();
+    FlushBuffers();
 
 #if JAVELIN_USE_WATCHDOG
     watchdog_update();
 #endif
+    StopInterruptUpdate();
     sleep_us(100);
   }
 }
@@ -309,46 +254,67 @@ int main(void) {
 #if JAVELIN_THREADS
   InitMulticore();
 #endif
-  Rp2040ButtonState::Initialize();
-  Rp2040Crc::Initialize();
+  PicoCrc32::Initialize();
+  PicoSplit::Initialize();
   Ws2812::Initialize();
-  Rp2040Split::Initialize();
+  Pinnacle::Initialize();
   Ssd1306::Initialize();
+  St7789::Initialize();
+
+#if defined(JAVELIN_PRE_BUTTON_STATE_INITIALIZE)
+  JAVELIN_PRE_BUTTON_STATE_INITIALIZE
+#endif
+
+  PicoButtonState::Initialize();
+  PicoEncoderState::Initialize();
+
+  InitializeInterruptUpdate();
 
   if (Split::IsMaster()) {
-    new (masterTaskContainer) MasterTask;
+    new (MasterTask::container) MasterTask;
 
+    Split::RegisterTxHandler(&MasterTask::container.value);
     Split::RegisterRxHandler(SplitHandlerId::KEY_STATE,
-                             &masterTaskContainer.value);
+                             &MasterTask::container.value);
     ConsoleInputBuffer::RegisterRxHandler();
-    KeyboardLedStatus::RegisterRxHandler();
     Ws2812::RegisterTxHandler();
     SplitHidReportBuffer::RegisterMasterHandlers();
-    Bootloader::RegisterTxHandler();
     SplitSerialBuffer::RegisterTxHandler();
+    SplitMidi::RegisterTxHandler();
+    SplitVersion::RegisterRxHandler();
+    Pinnacle::RegisterRxHandler();
     Ssd1306::RegisterMasterHandlers();
+    St7789::RegisterMasterHandlers();
     SplitUsbStatus::RegisterHandlers();
+    SplitConsole::RegisterHandlers();
+    PicoEncoderState::RegisterRxHandler();
 
     InitJavelinMaster();
-    ButtonManager::Initialize(BUTTON_MANAGER_BYTE_CODE);
+    ButtonScriptManager::Initialize(SCRIPT_BYTE_CODE);
     tusb_init();
 
     DoMasterRunLoop();
   } else {
-    new (slaveTaskContainer) SlaveTask;
+    new (SlaveTask::container) SlaveTask;
 
-    Split::RegisterTxHandler(&slaveTaskContainer.value);
+    Split::RegisterTxHandler(&SlaveTask::container.value);
+    Split::RegisterRxHandler(SplitHandlerId::KEY_STATE,
+                             &SlaveTask::container.value);
     ConsoleInputBuffer::RegisterTxHandler();
-    KeyboardLedStatus::RegisterTxHandler();
     Ws2812::RegisterRxHandler();
     SplitHidReportBuffer::RegisterSlaveHandlers();
-    Bootloader::RegisterRxHandler();
     SplitSerialBuffer::RegisterRxHandler();
+    SplitMidi::RegisterRxHandler();
+    SplitVersion::RegisterTxHandler();
+    Pinnacle::RegisterTxHandler();
     Ssd1306::RegisterSlaveHandlers();
+    St7789::RegisterSlaveHandlers();
     SplitUsbStatus::RegisterHandlers();
+    SplitConsole::RegisterHandlers();
+    PicoEncoderState::RegisterTxHandler();
 
     InitJavelinSlave();
-    ButtonManager::Initialize(BUTTON_MANAGER_BYTE_CODE);
+    ButtonScriptManager::Initialize(SCRIPT_BYTE_CODE);
 
     tusb_init();
     DoSlaveRunLoop();

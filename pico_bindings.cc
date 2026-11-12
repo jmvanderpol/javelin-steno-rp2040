@@ -2,13 +2,13 @@
 
 #include "auto_draw.h"
 #include "console_report_buffer.h"
-#include "hid_keyboard_report_builder.h"
-#include "hid_report_buffer.h"
-#include "javelin/button_manager.h"
+#include "javelin/asset_manager.h"
+#include "javelin/build_date.h"
+#include "javelin/button_script_manager.h"
 #include "javelin/clock.h"
 #include "javelin/config_block.h"
 #include "javelin/console.h"
-#include "javelin/dictionary/corrupted_dictionary.h"
+#include "javelin/console_input_buffer.h"
 #include "javelin/dictionary/debug_dictionary.h"
 #include "javelin/dictionary/dictionary.h"
 #include "javelin/dictionary/dictionary_definition.h"
@@ -16,6 +16,7 @@
 #include "javelin/dictionary/reverse_auto_suffix_dictionary.h"
 #include "javelin/dictionary/reverse_map_dictionary.h"
 #include "javelin/dictionary/reverse_prefix_dictionary.h"
+#include "javelin/dictionary/reverse_suffix_dictionary.h"
 #include "javelin/dictionary/unicode_dictionary.h"
 #include "javelin/dictionary/user_dictionary.h"
 #include "javelin/engine.h"
@@ -24,33 +25,42 @@
 #include "javelin/hal/connection.h"
 #include "javelin/hal/display.h"
 #include "javelin/hal/rgb.h"
-#include "javelin/key.h"
+#include "javelin/hal/rtc.h"
+#include "javelin/host_layout.h"
 #include "javelin/orthography.h"
 #include "javelin/processor/all_up.h"
 #include "javelin/processor/first_up.h"
 #include "javelin/processor/gemini.h"
 #include "javelin/processor/jeff_modifiers.h"
+#include "javelin/processor/paper_tape.h"
+#include "javelin/processor/passport.h"
 #include "javelin/processor/passthrough.h"
 #include "javelin/processor/plover_hid.h"
+#include "javelin/processor/procat.h"
 #include "javelin/processor/processor_list.h"
 #include "javelin/processor/repeat.h"
+#include "javelin/processor/tx_bolt.h"
 #include "javelin/script_byte_code.h"
+#include "javelin/script_storage.h"
+#include "javelin/split/split_console.h"
 #include "javelin/static_allocate.h"
-#include "javelin/steno_key_code.h"
-#include "javelin/steno_key_code_emitter.h"
+#include "javelin/system.h"
 #include "javelin/word_list.h"
-#include "javelin/wpm_tracker.h"
-#include "plover_hid_report_buffer.h"
-#include "rp2040_divider.h"
-#include "rp2040_split.h"
+#include "main_report_builder.h"
+#include "pico_encoder_state.h"
+#include "pico_split.h"
+#include "pinnacle.h"
 #include "ssd1306.h"
-#include "usb_descriptors.h"
+#include "st7789.h"
 
+#include <array>
 #include <hardware/clocks.h>
 #include <hardware/flash.h>
+#include <hardware/spi.h>
 #include <hardware/timer.h>
 #include <hardware/watchdog.h>
 #include <malloc.h>
+#include <pico/time.h>
 #include <tusb.h>
 
 #include JAVELIN_BOARD_CONFIG
@@ -60,23 +70,28 @@
 #define TRACE_RELEASE_PROCESSING_TIME 0
 #define ENABLE_DEBUG_COMMAND 0
 #define ENABLE_EXTRA_INFO 0
+#define ENABLE_TIME_COMMAND 1
 
 //---------------------------------------------------------------------------
 
 #if JAVELIN_USE_EMBEDDED_STENO
 #if JAVELIN_USE_USER_DICTIONARY
-StenoUserDictionaryData
+static StenoUserDictionaryData
     userDictionaryLayout((const uint8_t *)STENO_USER_DICTIONARY_ADDRESS,
                          STENO_USER_DICTIONARY_SIZE);
 static JavelinStaticAllocate<StenoUserDictionary> userDictionaryContainer;
 #endif
 #endif
 
-static StenoGemini gemini;
-static StenoPloverHid ploverHid;
+static PaperTape paperTape;
+static StenoGemini gemini(&paperTape);
+static StenoTxBolt txBolt(&paperTape);
+static StenoPassport passport(&paperTape);
+static StenoProcat procat(&paperTape);
+static StenoPloverHid ploverHid(&paperTape);
 static StenoProcessorElement *processors;
 
-#if JAVELIN_OLED_DRIVER
+#if JAVELIN_DISPLAY_DRIVER
 static JavelinStaticAllocate<StenoStrokeCapture> &passthroughContainer =
     StenoStrokeCapture::container;
 #else
@@ -85,7 +100,6 @@ static JavelinStaticAllocate<StenoPassthrough> passthroughContainer;
 
 #if JAVELIN_USE_EMBEDDED_STENO
 static JavelinStaticAllocate<StenoDictionaryList> dictionaryListContainer;
-static JavelinStaticAllocate<StenoEngine> engineContainer;
 static JavelinStaticAllocate<StenoJeffModifiers> jeffModifiersContainer;
 
 static JavelinStaticAllocate<StenoCompiledOrthography>
@@ -94,92 +108,109 @@ static JavelinStaticAllocate<StenoReverseMapDictionary>
     reverseMapDictionaryContainer;
 static JavelinStaticAllocate<StenoReversePrefixDictionary>
     reversePrefixDictionaryContainer;
+static JavelinStaticAllocate<StenoReverseSuffixDictionary>
+    reverseSuffixDictionaryContainer;
+static JavelinStaticAllocate<StenoReverseAutoSuffixDictionary>
+    reverseAutoSuffixForSuffixDictionaryContainer;
 static JavelinStaticAllocate<StenoReverseAutoSuffixDictionary>
     reverseAutoSuffixDictionaryContainer;
-
-static List<StenoDictionaryListEntry> dictionaries;
+static StenoProcessorElement *engineElement;
 #endif
 
 static JavelinStaticAllocate<StenoFirstUp> firstUpContainer;
 static JavelinStaticAllocate<StenoAllUp> allUpContainer;
 static JavelinStaticAllocate<StenoRepeat> repeatContainer;
+static JavelinStaticAllocate<StenoPassthrough> triggerContainer;
 
 extern "C" char __data_start__[], __data_end__[];
 extern "C" char __bss_start__[], __bss_end__[];
 
 static void PrintInfo_Binding(void *context, const char *commandLine) {
-  uint32_t uptime = Clock::GetMilliseconds();
-  auto &uptimeDivider = divider->Divide(uptime, 1000);
-  uint32_t microseconds = uptimeDivider.remainder;
-  uint32_t totalSeconds = uptimeDivider.quotient;
-  auto &totalSecondsDivider = divider->Divide(totalSeconds, 60);
-  uint32_t seconds = totalSecondsDivider.remainder;
-  uint32_t totalMinutes = totalSecondsDivider.quotient;
-  auto &totalMinutesDivider = divider->Divide(totalMinutes, 60);
-  uint32_t minutes = totalMinutesDivider.remainder;
-  uint32_t totalHours = totalMinutesDivider.quotient;
-  auto &totalHoursDivider = divider->Divide(totalHours, 24);
-  uint32_t hours = totalHoursDivider.remainder;
-  uint32_t days = totalHoursDivider.quotient;
-
   Console::Printf("System\n");
-  uint32_t systemClockKhz = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);
-  uint32_t systemMhz = divider->Divide(systemClockKhz, 1000).quotient;
-  Console::Printf("  Clock: %u MHz\n", systemMhz);
+  const uint32_t systemClockMhz =
+      frequency_count_mhz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);
+
+#if JAVELIN_PICO_PLATFORM == 2350
+#if __riscv
+  Console::Printf("  SoC: RP2350 RISC-V %u MHz\n", systemClockMhz);
+#else
+  Console::Printf("  SoC: RP2350 ARM %u MHz\n", systemClockMhz);
+#endif
+#elif JAVELIN_PICO_PLATFORM == 2040
+  Console::Printf("  SoC: RP2040 %u MHz\n", systemClockMhz);
+#else
+#error Unsupported platform
+#endif
+
+  const uint32_t uptime = Clock::GetMilliseconds();
+  const uint32_t totalSeconds = uptime / 1000;
+  const uint32_t microseconds = uptime % 1000;
+  const uint32_t totalMinutes = totalSeconds / 60;
+  const uint32_t seconds = totalSeconds % 60;
+  const uint32_t totalHours = totalMinutes / 60;
+  const uint32_t minutes = totalMinutes % 60;
+  const uint32_t days = totalHours / 24;
+  const uint32_t hours = totalHours % 24;
   Console::Printf("  Uptime: %ud %uh %um %0u.%03us\n", days, hours, minutes,
                   seconds, microseconds);
-  Console::Printf("  Chip version: %u\n", rp2040_chip_version());
-  Console::Printf("  ROM version: %u\n", rp2040_rom_version());
+  // Console::Printf("  Chip version: %u\n", rp2040_chip_version());
+  // Console::Printf("  ROM version: %u\n", rp2040_rom_version());
 
-  Console::Printf("  Serial number: ");
+  const uint32_t interrupts = save_and_disable_interrupts();
   uint8_t serialId[8];
-
-  uint32_t interrupts = save_and_disable_interrupts();
   flash_get_unique_id(serialId);
   restore_interrupts(interrupts);
 
+  Console::Printf("  Serial number: ");
   for (size_t i = 0; i < 8; ++i) {
     Console::Printf("%02x", serialId[i]);
   }
   Console::Printf("\n");
-
+  Console::Printf("  Firmware: Javelin %s\n", GetBuildDate());
+  Console::Printf("  Configuration: " JAVELIN_BOARD "\n");
   Console::Printf("  ");
-  HidKeyboardReportBuilder::instance.PrintInfo();
+  MainReportBuilder::instance.PrintInfo();
 
 #if ENABLE_EXTRA_INFO
   Connection::PrintInfo();
 #endif
 
   Console::Printf("Memory\n");
-  Console::Printf("  Data: %zu\n", __data_end__ - __data_start__);
-  Console::Printf("  BSS: %zu\n", __bss_end__ - __bss_start__);
-  struct mallinfo info = mallinfo();
-  Console::Printf("  Arena: %zu\n", info.arena);
-  Console::Printf("  Free chunks: %zu\n", info.ordblks);
-  Console::Printf("  Used: %zu\n", info.uordblks);
-  Console::Printf("  Free: %zu\n", info.fordblks);
+  Console::Printf("  Static: %zu (%zu data, %zu bss)\n",
+                  __bss_end__ - __data_start__, __data_end__ - __data_start__,
+                  __bss_end__ - __bss_start__);
+  const struct mallinfo info = mallinfo();
+  Console::Printf("  Dynamic: %zu (%zu used, %zu free)\n", info.arena,
+                  info.uordblks, info.fordblks);
+  Console::Printf("  Total: %zu\n", info.arena + __bss_end__ - __data_start__);
 
   Flash::PrintInfo();
   HidReportBufferBase::PrintInfo();
-  Rp2040Split::PrintInfo();
-
-#if ENABLE_EXTRA_INFO
-  ButtonManager::GetInstance().PrintInfo();
+#if JAVELIN_SPLIT
+  Console::Printf("Split\n");
+  PicoSplit::PrintInfo();
+  Split::PrintPacketTypeInfo();
 #endif
 
-  if (Rp2040Split::IsMaster()) {
+#if ENABLE_EXTRA_INFO
+  ButtonScriptManager::GetInstance().PrintInfo();
+  Pinnacle::PrintInfo();
+#endif
+
+  if (PicoSplit::IsMaster()) {
 #if ENABLE_EXTRA_INFO
     // The slave will always just print "Screen: present, present" here.
     // Rather than print incorrect info, don't print anything on the slave at
     // all.
     Ssd1306::PrintInfo();
+    St7789::PrintInfo();
 #endif
 
     Console::Printf("Processing chain\n");
     processors->PrintInfo();
 #if JAVELIN_USE_EMBEDDED_STENO
     Console::Printf("Text block: %zu bytes\n",
-                    STENO_MAP_DICTIONARY_COLLECTION_ADDRESS->textBlockLength);
+                    STENO_MAP_DICTIONARY_COLLECTION_ADDRESS->textBlock.count);
 #endif
   }
   Console::Write("\n", 1);
@@ -189,65 +220,46 @@ void Restart_Binding(void *context, const char *commandLine) {
   watchdog_reboot(0, 0, 0);
 }
 
-void SetUnicodeMode(void *context, const char *commandLine) {
-  const char *mode = strchr(commandLine, ' ');
-  if (!mode) {
-    Console::Printf("ERR No mode specified\n\n");
-    return;
-  }
-  ++mode;
-
-  if (StenoKeyCodeEmitter::SetUnicodeMode(mode)) {
-    Console::SendOk();
-  } else {
-    Console::Printf("ERR Unable to set mode: \"%s\"\n\n", mode);
-  }
-}
-
-void SetStenoMode(void *context, const char *commandLine) {
-  const char *stenoMode = strchr(commandLine, ' ');
-  if (!stenoMode) {
-    Console::Printf("ERR No steno mode layout specified\n\n");
+void SetStenoTrigger(void *context, const char *commandLine) {
+  const char *trigger = strchr(commandLine, ' ');
+  if (!trigger) {
+    Console::Printf("ERR No trigger specified\n\n");
     return;
   }
 
-  ++stenoMode;
-#if JAVELIN_USE_EMBEDDED_STENO
-  if (Str::Eq(stenoMode, "embedded")) {
-    passthroughContainer->SetNext(&engineContainer.value);
-  } else
-#endif
-      if (Str::Eq(stenoMode, "gemini")) {
-    passthroughContainer->SetNext(&gemini);
-  } else if (Str::Eq(stenoMode, "plover_hid")) {
-    passthroughContainer->SetNext(&ploverHid);
+  ++trigger;
+  if (Str::Eq(trigger, "all_up")) {
+    triggerContainer->SetNext(&allUpContainer.value);
+  } else if (Str::Eq(trigger, "first_up")) {
+    triggerContainer->SetNext(&firstUpContainer.value);
   } else {
-    Console::Printf("ERR Unable to set steno mode: \"%s\"\n\n", stenoMode);
+    Console::Printf("ERR Unable to set trigger mode: \"%s\"\n\n", trigger);
     return;
   }
 
   Console::SendOk();
+  ButtonScriptManager::ExecuteScript(ButtonScriptId::STENO_MODE_UPDATE);
 }
 
-void SetKeyboardProtocol(void *context, const char *commandLine) {
-  const char *keyboardProtocol = strchr(commandLine, ' ');
-  if (!keyboardProtocol) {
-    Console::Printf("ERR No keyboard protocol specified\n\n");
+#include "javelin/arm/systick.h"
+void Time_Binding(void *context, const char *commandLine) {
+  const char *p = strchr(commandLine, ' ');
+  if (p == nullptr) {
+    Console::Printf("ERR No command specified");
     return;
   }
 
-  ++keyboardProtocol;
-  if (Str::Eq(keyboardProtocol, "default")) {
-    HidKeyboardReportBuilder::instance.SetCompatibilityMode(false);
-  } else if (Str::Eq(keyboardProtocol, "compatibility")) {
-    HidKeyboardReportBuilder::instance.SetCompatibilityMode(true);
-  } else {
-    Console::Printf("ERR Unable to set keyboard protocol: \"%s\"\n\n",
-                    keyboardProtocol);
-    return;
-  }
+  ++p;
+  sysTick->EnableCycleCount();
+  const uint32_t t0 = sysTick->ReadCycleCount();
+  Console::RunCommand(p, ConsoleWriter::instance);
+  const uint32_t t1 = sysTick->ReadCycleCount();
 
-  Console::SendOk();
+  const uint32_t delta = (t1 - t0) & 0xffffff;
+
+  const uint32_t systemClockMhz =
+      frequency_count_mhz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);
+  Console::Printf("Time: %u cycles, %u µs\n\n", delta, delta / systemClockMhz);
 }
 
 struct ParameterData {
@@ -261,29 +273,46 @@ struct DynamicParameterData {
 };
 
 static const ParameterData PARAMETER_DATA[] = {
+#if JAVELIN_ANALOG_INPUT
+    {"analog_input_count", (void *)ANALOG_INPUT_COUNT},
+#else
+    {"analog_input_count", (void *)0},
+#endif
     {"button_count", (void *)BUTTON_COUNT},
-    {"button_script_address", BUTTON_MANAGER_BYTE_CODE},
-    {"button_script_byte_code_revision", (void *)SCRIPT_BYTE_CODE_REVISION},
 #if JAVELIN_USE_EMBEDDED_STENO
     {"dictionary_address", STENO_MAP_DICTIONARY_COLLECTION_ADDRESS},
 #endif
+#if JAVELIN_ENCODER
+    {"encoder_count", (void *)JAVELIN_ENCODER_COUNT},
+#else
+    {"encoder_count", (void *)0},
+#endif
     {"flash_memory_address", (void *)0x10000000},
-    {"maximum_button_script_size", (void *)MAXIMUM_BUTTON_SCRIPT_SIZE},
 #if JAVELIN_USE_EMBEDDED_STENO
+    {"host_layouts_address", (void *)HOST_LAYOUTS_ADDRESS},
+    {"host_layouts_version", (void *)HOST_LAYOUTS_VERSION},
     {"maximum_dictionary_size", (void *)MAXIMUM_MAP_DICTIONARY_SIZE},
+    {"maximum_host_layouts_size", (void *)MAXIMUM_HOST_LAYOUTS_SIZE},
+#endif
+    {"maximum_script_size", (void *)MAXIMUM_BUTTON_SCRIPT_SIZE},
+#if JAVELIN_USE_SCRIPT_STORAGE
+    {"maximum_script_storage_size", (void *)MAXIMUM_SCRIPT_STORAGE_SIZE},
+#endif
+#if JAVELIN_POINTER
+    {"pointer_count", (void *)JAVELIN_POINTER_COUNT},
+#else
+    {"pointer_count", (void *)0},
+#endif
+    {"script_address", SCRIPT_BYTE_CODE},
+    {"script_byte_code_version", (void *)SCRIPT_BYTE_CODE_VERSION},
+#if JAVELIN_USE_SCRIPT_STORAGE
+    {"script_storage_address", SCRIPT_STORAGE_ADDRESS},
 #endif
 };
 
-#if JAVELIN_USE_EMBEDDED_STENO
-static void GetKeyboardLayout() {
-  Console::Printf("%s\n\n", KeyboardLayout::GetActiveLayout().GetName());
-}
-
-static void GetKeyboardProtocol() {
-  Console::Printf("%s\n\n",
-                  HidKeyboardReportBuilder::instance.IsCompatibilityMode()
-                      ? "compatibility"
-                      : "default");
+#if defined(JAVELIN_SCRIPT_CONFIGURATION)
+static void GetScriptConfiguration() {
+  Console::Printf("%s\n\n", JAVELIN_SCRIPT_CONFIGURATION);
 }
 #endif
 
@@ -313,49 +342,131 @@ static void GetScriptHeader() {
 
 #if JAVELIN_USE_EMBEDDED_STENO
 static void GetSpacePosition() {
-  Console::Printf("%s\n\n",
-                  engineContainer->IsSpaceAfter() ? "after" : "before");
+  Console::Printf(
+      "%s\n\n", StenoEngine::GetInstance().IsSpaceAfter() ? "after" : "before");
 }
 
 static void GetStrokeCount() {
-  Console::Printf("%zu\n\n", engineContainer->GetStrokeCount());
+  Console::Printf("%zu\n\n", StenoEngine::GetInstance().GetStrokeCount());
 }
-
-static void GetUnicodeMode() {
-  Console::Printf("%s\n\n", StenoKeyCodeEmitter::GetUnicodeModeName());
-}
-
 #endif
+
+struct StenoModeData {
+  StenoProcessorElement *processor;
+  const char *name;
+};
+
+const StenoModeData STENO_MODE_DATA[] = {
+    {&gemini, "gemini"},        //
+    {&txBolt, "tx_bolt"},       //
+    {&passport, "passport"},    //
+    {&procat, "procat"},        //
+    {&ploverHid, "plover_hid"}, //
+};
 
 static void GetStenoMode() {
   const StenoProcessorElement *processor = passthroughContainer->GetNext();
+
 #if JAVELIN_USE_EMBEDDED_STENO
-  if (processor == &engineContainer.value) {
+  if (processor == engineElement) {
     Console::Printf("embedded\n\n");
+    return;
+  }
+#endif
+
+  for (const StenoModeData &data : STENO_MODE_DATA) {
+    if (processor == data.processor) {
+      Console::Printf("%s\n\n", data.name);
+      return;
+    }
+  }
+
+  Console::Printf("ERR Internal consistency error\n\n");
+}
+
+bool SetStenoMode(const char *name) {
+  for (const StenoModeData &data : STENO_MODE_DATA) {
+    if (Str::Eq(name, data.name)) {
+      passthroughContainer->SetNext(data.processor);
+      return true;
+    }
+  }
+  return false;
+}
+
+void SetStenoMode(void *context, const char *commandLine) {
+  const char *stenoMode = strchr(commandLine, ' ');
+  if (!stenoMode) {
+    Console::Printf("ERR No steno mode specified\n\n");
+    return;
+  }
+
+  ++stenoMode;
+#if JAVELIN_USE_EMBEDDED_STENO
+  if (Str::Eq(stenoMode, "embedded")) {
+    passthroughContainer->SetNext(engineElement);
   } else
 #endif
-      if (processor == &gemini) {
-    Console::Printf("gemini\n\n");
-  } else if (processor == &ploverHid) {
-    Console::Printf("plover_hid\n\n");
+      if (!SetStenoMode(stenoMode)) {
+    Console::Printf("ERR Unable to set steno mode: \"%s\"\n\n", stenoMode);
+    return;
+  }
+
+  Console::SendOk();
+  ButtonScriptManager::ExecuteScript(ButtonScriptId::STENO_MODE_UPDATE);
+}
+
+#if JAVELIN_USE_EMBEDDED_STENO
+static void GetStenoSystem() {
+  Console::Printf("%s\n\n", SYSTEM_ADDRESS->layout);
+}
+#endif
+
+static void GetStenoTrigger() {
+  const StenoProcessorElement *trigger = triggerContainer->GetNext();
+  if (trigger == &allUpContainer.value) {
+    Console::Printf("all_up\n\n");
+  } else if (trigger == &firstUpContainer.value) {
+    Console::Printf("first_up\n\n");
   } else {
     Console::Printf("ERR Internal consistency error\n\n");
   }
 }
 
-static const DynamicParameterData DYNAMIC_PARAMETER_DATA[] = {
+static void GetFirmwareBuildDate() {
+  Console::Printf("%s\n\n", GetBuildDate());
+}
+
+static constexpr DynamicParameterData DYNAMIC_PARAMETER_DATA[] = {
+    {"available_asset_storage", &AssetManager::PrintFreeSize},
 #if JAVELIN_USE_EMBEDDED_STENO
-    {"keyboard_layout", GetKeyboardLayout},
-    {"keyboard_protocol", GetKeyboardProtocol},
+    {"available_host_layouts", &HostLayouts::ListHostLayouts},
 #endif
+    {"date_time", &RTC::GetDateTime_Binding},
+    {"date_time_valid", &RTC::GetDateTimeValid_Binding},
+    {"firmware_build_date", &GetFirmwareBuildDate},
+#if JAVELIN_USE_EMBEDDED_STENO
+    {"host_layout", &HostLayouts::GetHostLayout},
+#endif
+    {"keyboard_protocol", &MainReportBuilder::GetKeyboardProtocol_Binding},
+#if defined(JAVELIN_SCRIPT_CONFIGURATION)
+    {"script_configuration", GetScriptConfiguration},
+#endif
+    {"script_event_history", &ButtonScriptManager::PrintEventHistory},
     {"script_header", GetScriptHeader},
+#if JAVELIN_USE_SCRIPT_STORAGE
+    {"script_storage", &ScriptStorageData::HandleGetScriptStorageParameter},
+#endif
 #if JAVELIN_USE_EMBEDDED_STENO
     {"space_position", GetSpacePosition},
 #endif
     {"steno_mode", GetStenoMode},
 #if JAVELIN_USE_EMBEDDED_STENO
+    {"steno_system", GetStenoSystem},
+#endif
+    {"steno_trigger", GetStenoTrigger},
+#if JAVELIN_USE_EMBEDDED_STENO
     {"stroke_count", GetStrokeCount},
-    {"unicode_mode", GetUnicodeMode},
 #endif
 };
 
@@ -369,7 +480,8 @@ void GetParameterBinding(void *context, const char *commandLine) {
 
   for (const ParameterData &data : PARAMETER_DATA) {
     if (Str::Eq(parameterName, data.name)) {
-      Console::Printf("%p\n\n", data.value);
+      Console::Printf(uintptr_t(data.value) <= 9 ? "%d\n\n" : "0x%p\n\n",
+                      data.value);
       return;
     }
   }
@@ -385,59 +497,50 @@ void GetParameterBinding(void *context, const char *commandLine) {
 }
 
 void ListParametersBinding(void *context, const char *commandLine) {
-  Console::Printf("Static parameters\n");
-  for (const ParameterData &data : PARAMETER_DATA) {
-    Console::Printf("  • %s\n", data.name);
-  }
+  const ParameterData *staticParameter = std::begin(PARAMETER_DATA);
+  const ParameterData *staticEnd = std::end(PARAMETER_DATA);
 
-  Console::Printf(" \nDynamic parameters\n");
-  for (const DynamicParameterData &data : DYNAMIC_PARAMETER_DATA) {
-    Console::Printf("  • %s\n", data.name);
+  const DynamicParameterData *dynamicParameter =
+      std::begin(DYNAMIC_PARAMETER_DATA);
+  const DynamicParameterData *dynamicParameterEnd =
+      std::end(DYNAMIC_PARAMETER_DATA);
+
+  Console::Printf("Available parameters:\n");
+  while (staticParameter != staticEnd ||
+         dynamicParameter != dynamicParameterEnd) {
+    if (staticParameter == staticEnd) {
+      Console::Printf("• %s\n", dynamicParameter->name);
+      ++dynamicParameter;
+    } else if (dynamicParameter == dynamicParameterEnd ||
+               strcmp(staticParameter->name, dynamicParameter->name) < 0) {
+      Console::Printf("• %s\n", staticParameter->name);
+      ++staticParameter;
+    } else {
+      Console::Printf("• %s\n", dynamicParameter->name);
+      ++dynamicParameter;
+    }
   }
 
   Console::Printf("\n");
 }
 
-#if JAVELIN_USE_EMBEDDED_STENO
-void StenoOrthography_Print_Binding(void *context, const char *commandLine) {
-  ORTHOGRAPHY_ADDRESS->Print();
-}
-#endif
-
-#if JAVELIN_OLED_DRIVER
-
-void MeasureText_Binding(void *context, const char *commandLine) {
-  const char *p = strchr(commandLine, ' ');
-
-  if (!p) {
-    Console::Printf("ERR No parameters specified\n\n");
-    return;
-  }
-  int fontId = 0;
-  ++p;
-  if (*p < '0' && *p >= '9') {
-    Console::Printf("ERR fontId parameter missing\n\n");
-    return;
-  }
-  while ('0' <= *p && *p <= '9') {
-    fontId = 10 * fontId + *p - '0';
-    ++p;
-  }
-  if (*p != ' ') {
-    Console::Printf("ERR fontId parameter missing\n\n");
-    return;
-  }
-  ++p;
-
-  const Font *font = Font::GetFont(fontId);
-  uint32_t width = font->GetStringWidth(p);
-  Console::Printf("Width: %u\n\n", width);
-}
-
-#endif
-
 #if ENABLE_DEBUG_COMMAND
-void Debug_Binding(void *context, const char *commandLine) {}
+
+uint32_t debugValue;
+void Debug_Binding(void *context, const char *commandLine) {
+  const char *param = strchr(commandLine, ' ');
+  int command = 0;
+  if (param) {
+    Str::ParseInteger(&command, param + 1);
+  }
+
+  Console::Printf("Debug command: %d\n\n", command);
+  switch (command) {
+  case 0:
+    Console::Printf("Debug value: %u\n\n", debugValue);
+    break;
+  }
+}
 #endif
 
 #if JAVELIN_USE_WATCHDOG
@@ -451,16 +554,11 @@ void Watchdog_Binding(void *context, const char *commandLine) {
 }
 #endif
 
-struct WordListData {
-  uint32_t length;
-  uint8_t data[1];
-};
-
 void InitCommonCommands() {
   Console &console = Console::instance;
-  console.RegisterCommand("info", "System information", PrintInfo_Binding,
-                          nullptr);
-  console.RegisterCommand("restart", "Restart the device", Restart_Binding,
+  console.RegisterCommand("info", "Prints system information",
+                          PrintInfo_Binding, nullptr);
+  console.RegisterCommand("restart", "Restarts the device", Restart_Binding,
                           nullptr);
   console.RegisterCommand("get_parameter",
                           "Gets the value of the specified parameter",
@@ -468,30 +566,59 @@ void InitCommonCommands() {
   console.RegisterCommand("list_parameters",
                           "Lists all available parameter names",
                           ListParametersBinding, nullptr);
-  console.RegisterCommand("begin_write",
-                          "Begin a flash write to the specified address",
-                          &Flash::BeginWriteBinding, nullptr);
-  console.RegisterCommand("write",
-                          "Writes base64 data to the address specified in "
-                          "begin_write",
-                          &Flash::WriteBinding, nullptr);
-  console.RegisterCommand("end_write", "Completes writing to flash",
-                          &Flash::EndWriteBinding, nullptr);
-}
 
-void InitJavelinSlave() {
-  InitCommonCommands();
+  RTC::AddConsoleCommands(console);
+  Flash::AddConsoleCommands(console);
 
-  Console &console = Console::instance;
-  console.RegisterCommand("launch_pair_bootloader",
-                          "Launch pair rp2040 bootloader",
-                          Bootloader::LaunchBootloader, nullptr);
+#if ENABLE_TIME_COMMAND
+  console.RegisterCommand("time", "Measures execution time of command",
+                          &Time_Binding, nullptr);
+#endif
+
+  Rgb::AddConsoleCommands(console);
+  Bootloader::AddConsoleCommands(console);
+  ButtonScriptManager::GetInstance().AddConsoleCommands(console);
+
+#if JAVELIN_USE_EMBEDDED_STENO
+  const intptr_t endOfDictionaryData =
+      intptr_t(STENO_MAP_DICTIONARY_COLLECTION_ADDRESS->GetEndOfData());
+  const intptr_t endOfDictionaryDataAligned =
+      (endOfDictionaryData + Flash::BLOCK_SIZE - 1) & -Flash::BLOCK_SIZE;
+
+  if (endOfDictionaryDataAligned < ASSET_STORAGE_END_ADDRESS) {
+    AssetManager::Initialize(
+        endOfDictionaryDataAligned,
+        ASSET_STORAGE_END_ADDRESS - endOfDictionaryDataAligned,
+        STENO_MAP_DICTIONARY_COLLECTION_ADDRESS->timestamp);
+  }
+#else
+  AssetManager::Initialize(
+      ASSET_STORAGE_START_ADDRESS,
+      ASSET_STORAGE_END_ADDRESS - ASSET_STORAGE_START_ADDRESS, 0);
+#endif
+  AssetManager::AddConsoleCommands(console);
+
 #if JAVELIN_USE_WATCHDOG
   console.RegisterCommand("watchdog", "Show watchdog scratch registers",
                           Watchdog_Binding, nullptr);
 #endif
+
 #if ENABLE_DEBUG_COMMAND
   console.RegisterCommand("debug", "Runs debug code", Debug_Binding, nullptr);
+#endif
+
+#if JAVELIN_ENCODER
+  console.RegisterCommand(
+      "set_encoder_configuration", "Sets encoder configuration. ",
+      &PicoEncoderState::SetEncoderConfiguration_Binding, nullptr);
+#endif
+}
+
+void InitJavelinSlave() {
+  InitCommonCommands();
+  Console &console = Console::instance;
+#if JAVELIN_SPLIT
+  ConsoleInputBuffer::AddConsoleCommands(console);
 #endif
 }
 
@@ -499,19 +626,16 @@ void InitJavelinMaster() {
   const StenoConfigBlock *config = STENO_CONFIG_BLOCK_ADDRESS;
 
 #if JAVELIN_USE_EMBEDDED_STENO
-  HidKeyboardReportBuilder::instance.SetCompatibilityMode(
-      config->hidCompatibilityMode);
-  StenoKeyCodeEmitter::SetUnicodeMode(config->unicodeMode);
-  KeyboardLayout::SetActiveLayout(config->keyboardLayout);
-
-  const WordListData *const wordListData =
-      (const WordListData *)STENO_WORD_LIST_ADDRESS;
-  WordList::SetData(wordListData->data, wordListData->length);
+  MainReportBuilder::instance.SetConfiguration(config->hidCompatibilityMode);
+  HostLayouts::SetData(*HOST_LAYOUTS_ADDRESS);
+  WordList::instance.SetData(*(const WordListData *)STENO_WORD_LIST_ADDRESS);
+  StenoStroke::SetLanguage(SYSTEM_ADDRESS->keys);
 
   memcpy(StenoKeyState::STROKE_BIT_INDEX_LOOKUP, config->keyMap,
          sizeof(config->keyMap));
 
   // Setup dictionary list.
+  List<StenoDictionaryListEntry> dictionaries;
   // dictionaries.Add(
   //     StenoDictionaryListEntry(&StenoDebugDictionary::instance, true));
 
@@ -526,16 +650,29 @@ void InitJavelinMaster() {
   dictionaries.Add(
       StenoDictionaryListEntry(&StenoUnicodeDictionary::instance, true));
 
-  new (dictionaryListContainer) StenoDictionaryList(dictionaries);
+  new (dictionaryListContainer)
+      StenoDictionaryList((List<StenoDictionaryListEntry> &&)dictionaries);
   new (compiledOrthographyContainer)
-      StenoCompiledOrthography(*ORTHOGRAPHY_ADDRESS);
+      StenoCompiledOrthography(SYSTEM_ADDRESS->orthography);
 
   StenoDictionary *dictionary = &dictionaryListContainer.value;
   if (STENO_MAP_DICTIONARY_COLLECTION_ADDRESS->hasReverseLookup) {
     dictionary = new (reverseMapDictionaryContainer) StenoReverseMapDictionary(
         dictionary, (const uint8_t *)STENO_MAP_DICTIONARY_COLLECTION_ADDRESS,
-        STENO_MAP_DICTIONARY_COLLECTION_ADDRESS->textBlock,
-        STENO_MAP_DICTIONARY_COLLECTION_ADDRESS->textBlockLength);
+        STENO_MAP_DICTIONARY_COLLECTION_ADDRESS->textBlock);
+
+    new (reverseAutoSuffixForSuffixDictionaryContainer)
+        StenoReverseAutoSuffixDictionary(dictionary,
+                                         compiledOrthographyContainer);
+
+    dictionary =
+        new (reverseSuffixDictionaryContainer) StenoReverseSuffixDictionary(
+            dictionary,
+            (const uint8_t *)STENO_MAP_DICTIONARY_COLLECTION_ADDRESS,
+            SYSTEM_ADDRESS->orthography.reverseSuffixes,
+            compiledOrthographyContainer,
+            &reverseAutoSuffixForSuffixDictionaryContainer.value,
+            STENO_MAP_DICTIONARY_COLLECTION_ADDRESS->suffixes);
 
     dictionary = new (reverseAutoSuffixDictionaryContainer)
         StenoReverseAutoSuffixDictionary(dictionary,
@@ -545,13 +682,15 @@ void InitJavelinMaster() {
         new (reversePrefixDictionaryContainer) StenoReversePrefixDictionary(
             dictionary,
             (const uint8_t *)STENO_MAP_DICTIONARY_COLLECTION_ADDRESS,
-            STENO_MAP_DICTIONARY_COLLECTION_ADDRESS->textBlock,
-            STENO_MAP_DICTIONARY_COLLECTION_ADDRESS->textBlockLength);
+            STENO_MAP_DICTIONARY_COLLECTION_ADDRESS->prefixes);
+
+    dictionary = dictionaryListContainer->CreateCacheDictionary(dictionary);
   }
 
   // Set up processors.
-  StenoEngine *engine = new (engineContainer)
-      StenoEngine(*dictionary, compiledOrthographyContainer,
+  StenoEngine *engine = new (StenoEngine::container)
+      StenoEngine(*dictionary, SYSTEM_ADDRESS, compiledOrthographyContainer,
+                  SYSTEM_ADDRESS->undoStroke,
 #if JAVELIN_USE_USER_DICTIONARY
                   userDictionary
 #else
@@ -564,119 +703,42 @@ void InitJavelinMaster() {
 
   InitCommonCommands();
   Console &console = Console::instance;
-  console.RegisterCommand("launch_bootloader", "Launch rp2040 bootloader",
-                          Bootloader::LaunchBootloader, nullptr);
-#if JAVELIN_SPLIT
-  console.RegisterCommand("launch_pair_bootloader",
-                          "Launch pair rp2040 bootloader",
-                          Bootloader::LaunchSlaveBootloader, nullptr);
-#endif
-#if JAVELIN_USE_WATCHDOG
-  console.RegisterCommand("watchdog", "Show watchdog scratch registers",
-                          Watchdog_Binding, nullptr);
-#endif
 
+  console.RegisterCommand(
+      "set_steno_mode",
 #if JAVELIN_USE_EMBEDDED_STENO
-  console.RegisterCommand("set_steno_mode",
-                          "Sets the current steno mode [\"embedded\", "
-                          "\"gemini\", \"plover_hid\"]",
-                          SetStenoMode, nullptr);
+      "Sets the current steno mode [\"embedded\", "
 #else
-  console.RegisterCommand("set_steno_mode",
-                          "Sets the current steno mode ["
-                          "\"gemini\", \"plover_hid\"]",
-                          SetStenoMode, nullptr);
+      "Sets the current steno mode ["
 #endif
-  console.RegisterCommand("set_keyboard_protocol",
-                          "Sets the current keyboard protocol "
-                          "[\"default\", \"compatibility\"]",
-                          SetKeyboardProtocol, nullptr);
-  console.RegisterCommand("set_unicode_mode", "Sets the current unicode mode",
-                          SetUnicodeMode, nullptr);
-  console.RegisterCommand("set_keyboard_layout",
-                          "Sets the current keyboard layout",
-                          &KeyboardLayout::SetKeyboardLayout_Binding, nullptr);
+      "\"gemini\", \"tx_bolt\", \"passport\", \"procat\", \"plover_hid\"]",
+      SetStenoMode, nullptr);
+
+  console.RegisterCommand(
+      "set_steno_trigger",
+      "Sets the current steno trigger [\"first_up\", \"all_up\"]",
+      SetStenoTrigger, nullptr);
+  MainReportBuilder::instance.AddConsoleCommands(console);
+  HostLayouts::AddConsoleCommands(console);
 #if JAVELIN_USE_EMBEDDED_STENO
-  console.RegisterCommand("set_space_position",
-                          "Controls space position before or after",
-                          StenoEngine::SetSpacePosition_Binding, engine);
-  console.RegisterCommand("list_dictionaries", "Lists dictionaries",
-                          StenoEngine::ListDictionaries_Binding, engine);
-  console.RegisterCommand("enable_dictionary", "Enables a dictionary",
-                          StenoEngine::EnableDictionary_Binding, engine);
-  console.RegisterCommand("disable_dictionary", "Disable a dictionary",
-                          StenoEngine::DisableDictionary_Binding, engine);
-  console.RegisterCommand("toggle_dictionary", "Toggle a dictionary",
-                          StenoEngine::ToggleDictionary_Binding, engine);
-  console.RegisterCommand(
-      "enable_dictionary_status", "Enable sending dictionary status updates",
-      StenoDictionaryList::EnableDictionaryStatus_Binding, nullptr);
-  console.RegisterCommand(
-      "disable_dictionary_status", "Disable sending dictionary status updates",
-      StenoDictionaryList::DisableDictionaryStatus_Binding, nullptr);
-  console.RegisterCommand("print_dictionary",
-                          "Prints all dictionaries in JSON format",
-                          StenoEngine::PrintDictionary_Binding, engine);
-  console.RegisterCommand("print_orthography",
-                          "Prints all orthography rules in JSON format",
-                          StenoOrthography_Print_Binding, nullptr);
-  console.RegisterCommand("enable_paper_tape", "Enables paper tape output",
-                          StenoEngine::EnablePaperTape_Binding, engine);
-  console.RegisterCommand("disable_paper_tape", "Disables paper tape output",
-                          StenoEngine::DisablePaperTape_Binding, engine);
-  console.RegisterCommand("enable_suggestions", "Enables suggestions output",
-                          StenoEngine::EnableSuggestions_Binding, engine);
-  console.RegisterCommand("disable_suggestions", "Disables suggestions output",
-                          StenoEngine::DisableSuggestions_Binding, engine);
-  console.RegisterCommand("enable_text_log", "Enables text log output",
-                          StenoEngine::EnableTextLog_Binding, engine);
-  console.RegisterCommand("disable_text_log", "Disables text log output",
-                          StenoEngine::DisableTextLog_Binding, engine);
-  console.RegisterCommand("lookup", "Looks up a word",
-                          StenoEngine::Lookup_Binding, engine);
-  console.RegisterCommand("lookup_stroke", "Looks up a stroke",
-                          StenoEngine::LookupStroke_Binding, engine);
-#endif
-
-#if JAVELIN_RGB
-  console.RegisterCommand("set_rgb", "Sets a single RGB (index, r, g, b)",
-                          Rgb::SetRgb_Binding, nullptr);
-#endif
-
-#if JAVELIN_OLED_DRIVER
-  console.RegisterCommand("set_auto_draw",
-                          "Set a display auto-draw mode [\"none\", "
-                          "\"paper_tape\", \"steno_layout\", \"wpm\"]",
-                          StenoStrokeCapture::SetAutoDraw_Binding,
-                          &passthroughContainer.value);
-  console.RegisterCommand("measure_text", "Measures the width of text",
-                          MeasureText_Binding, nullptr);
-#endif
-
-#if ENABLE_DEBUG_COMMAND
-  console.RegisterCommand("debug", "Runs debug code", Debug_Binding, nullptr);
+  engine->AddConsoleCommands(console);
+  console.RegisterCommand("print_system", "Prints stenography system data",
+                          &StenoSystem::Print_Binding, (void *)SYSTEM_ADDRESS);
 #endif
 
 #if JAVELIN_USE_EMBEDDED_STENO
-#if JAVELIN_USE_USER_DICTIONARY
-  console.RegisterCommand(
-      "print_user_dictionary", "Prints the user dictionary in JSON format",
-      StenoUserDictionary::PrintJsonDictionary_Binding, userDictionary);
-  console.RegisterCommand("reset_user_dictionary", "Resets the user dictionary",
-                          StenoUserDictionary::Reset_Binding, userDictionary);
-  console.RegisterCommand(
-      "add_user_entry", "Adds a definition to the user dictionary",
-      StenoUserDictionary::AddEntry_Binding, userDictionary);
-  console.RegisterCommand(
-      "remove_user_entry", "Removes a definition from the user dictionary",
-      StenoUserDictionary::RemoveEntry_Binding, userDictionary);
-#endif
+  userDictionary->AddConsoleCommands(console);
 
   StenoProcessorElement *processorElement = engine;
+  if (config->useJeffModifiers) {
+    processorElement =
+        new (jeffModifiersContainer) StenoJeffModifiers(*processorElement);
+  }
+  engineElement = processorElement;
 #else
   StenoProcessorElement *processorElement = &gemini;
 #endif
-#if JAVELIN_OLED_DRIVER
+#if JAVELIN_DISPLAY_DRIVER
   processorElement =
       new (passthroughContainer) StenoStrokeCapture(processorElement);
 #else
@@ -684,31 +746,30 @@ void InitJavelinMaster() {
       new (passthroughContainer) StenoPassthrough(processorElement);
 #endif
 
-#if JAVELIN_USE_EMBEDDED_STENO
-  if (config->useJeffModifiers) {
-    processorElement =
-        new (jeffModifiersContainer) StenoJeffModifiers(*processorElement);
-  }
-#endif
-
-  if (config->useFirstUp) {
-    processorElement = new (firstUpContainer) StenoFirstUp(*processorElement);
-  } else {
-    processorElement = new (allUpContainer) StenoAllUp(*processorElement);
-  }
+  new (firstUpContainer) StenoFirstUp(*processorElement);
+  new (allUpContainer) StenoAllUp(*processorElement);
+  processorElement = config->useFirstUp
+                         ? (StenoProcessorElement *)&firstUpContainer.value
+                         : (StenoProcessorElement *)&allUpContainer.value;
+  processorElement = new (triggerContainer) StenoPassthrough(processorElement);
 
   if (config->useRepeat) {
     processorElement = new (repeatContainer) StenoRepeat(*processorElement);
   }
 
   processors = processorElement;
+
+  SplitConsole::AddConsoleCommands(console);
 }
 
-void Script::OnStenoKeyPressed() {
+void ButtonScript::OnStenoKeyPressed() {
+#if JAVELIN_USE_EMBEDDED_STENO
   processors->Process(stenoState, StenoAction::PRESS);
+#endif
 }
 
-void Script::OnStenoKeyReleased() {
+void ButtonScript::OnStenoKeyReleased() {
+#if JAVELIN_USE_EMBEDDED_STENO
 #if TRACE_RELEASE_PROCESSING_TIME
   uint32_t t0 = Clock::GetMicroseconds();
 #endif
@@ -717,52 +778,24 @@ void Script::OnStenoKeyReleased() {
   uint32_t t1 = Clock::GetMicroseconds();
   Console::Printf("Release processing time: %u\n\n", t1 - t0);
 #endif
+#endif
 }
 
-void Script::OnStenoStateCancelled() {
-  processors->Process(StenoKeyState(0), StenoAction::CANCEL);
-}
-
-void Script::SendText(const uint8_t *text) const {
+void ButtonScript::CancelStenoKeys(StenoKeyState state) {
 #if JAVELIN_USE_EMBEDDED_STENO
-  engineContainer->SendText(text);
+  processors->Process(state, StenoAction::CANCEL_KEY);
 #endif
 }
 
-bool Script::ProcessScanCode(int scanCode, ScanCodeAction action) {
+void ButtonScript::CancelAllStenoKeys() {
 #if JAVELIN_USE_EMBEDDED_STENO
-  uint32_t modifiers = keyState.GetRange(KeyCode::L_CTRL, KeyCode::L_CTRL + 8)
-                       << MODIFIER_BIT_SHIFT;
-  return engineContainer->ProcessScanCode(scanCode | modifiers, action);
-#else
-  return false;
+  processors->Process(StenoKeyState(0), StenoAction::CANCEL_ALL);
 #endif
 }
 
-void ProcessStenoTick() {
-  processors->Tick();
-  HidKeyboardReportBuilder::instance.FlushIfRequired();
-  ConsoleReportBuffer::instance.Flush();
+void FlushBuffers() {
+  MainReportBuilder::instance.FlushAllIfRequired();
+  Console::Flush();
 }
-
-//---------------------------------------------------------------------------
-
-void Key::PressRaw(KeyCode key) {
-#if JAVELIN_OLED_DRIVER
-  if (key.value == KeyCode::BACKSPACE) {
-    WpmTracker::instance.Tally(-1);
-  } else if (key.IsVisible()) {
-    WpmTracker::instance.Tally(1);
-  }
-#endif
-
-  HidKeyboardReportBuilder::instance.Press(key.value);
-}
-
-void Key::ReleaseRaw(KeyCode key) {
-  HidKeyboardReportBuilder::instance.Release(key.value);
-}
-
-void Key::Flush() { HidKeyboardReportBuilder::instance.Flush(); }
 
 //---------------------------------------------------------------------------

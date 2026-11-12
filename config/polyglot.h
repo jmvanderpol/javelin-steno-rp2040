@@ -1,30 +1,25 @@
 //---------------------------------------------------------------------------
 
 #pragma once
-#include <stddef.h>
-#include <stdint.h>
+#include "main_flash_layout.h"
 
 //---------------------------------------------------------------------------
 
-struct StenoConfigBlock;
-struct StenoOrthography;
-struct StenoDictionaryCollection;
-
-//---------------------------------------------------------------------------
+#define JAVELIN_USE_EMBEDDED_STENO 1
+#define JAVELIN_USE_USER_DICTIONARY 1
+#define JAVELIN_USB_MILLIAMPS 100
 
 #define JAVELIN_RGB 1
 #define JAVELIN_RGB_COUNT 32
 #define JAVELIN_RGB_PIN 4
 
-#define JAVELIN_USE_EMBEDDED_STENO 1
-#define JAVELIN_USE_USER_DICTIONARY 1
-#define JAVELIN_USB_MILLIAMPS 500
 #define BOOTSEL_BUTTON_INDEX 42
 
+#define JAVELIN_DEBOUNCE_MS 10
+#define JAVELIN_BUTTON_MATRIX 1
+
 constexpr uint8_t COLUMN_PINS[] = {24, 23, 21, 20, 19, 18, 11, 10, 9, 8, 6, 5};
-constexpr uint32_t COLUMN_PIN_MASK = 0x01bc0f60;
 constexpr uint8_t ROW_PINS[] = {26, 25, 17, 16};
-constexpr uint32_t ROW_PIN_MASK = 0x06030000;
 
 // clang-format off
 constexpr int8_t KEY_MAP[4][16] = {
@@ -35,20 +30,9 @@ constexpr int8_t KEY_MAP[4][16] = {
 };
 // clang-format on
 
-const StenoOrthography *const ORTHOGRAPHY_ADDRESS =
-    (const StenoOrthography *)0x1003e000;
-const uint8_t *const STENO_WORD_LIST_ADDRESS = (const uint8_t *)0x10040000;
-const StenoConfigBlock *const STENO_CONFIG_BLOCK_ADDRESS =
-    (const StenoConfigBlock *)0x103fe000;
-const uint8_t *const BUTTON_MANAGER_BYTE_CODE = (const uint8_t *)0x103fe100;
-const StenoDictionaryCollection *const STENO_MAP_DICTIONARY_COLLECTION_ADDRESS =
-    (const StenoDictionaryCollection *)0x10400000;
-const uint8_t *const STENO_USER_DICTIONARY_ADDRESS =
-    (const uint8_t *)0x10fc0000;
-const size_t STENO_USER_DICTIONARY_SIZE = 0x40000;
+#define JAVELIN_SCRIPT_CONFIGURATION                                           \
+  R"({"n":"Polyglot","s":[{"c":"ff000000","s":"f","p":[{"c":"m","p":[-0.05,1]},{"c":"rl","p":[0,-1.05]},{"c":"ra","p":[13.1,0,0.05]},{"c":"ra","p":[0,4.1,0.05]},{"c":"ra","p":[-13.1,0,0.05]},{"c":"ra","p":[0,-1,0.05]},{"c":"c"}]}],"k":[{"x":0,"y":0},{"x":1,"y":0},{"x":2,"y":0},{"x":3,"y":0},{"x":4,"y":0},{"x":5,"y":0},{"x":7,"y":0},{"x":8,"y":0},{"x":9,"y":0},{"x":10,"y":0},{"x":11,"y":0},{"x":12,"y":0},{"x":0,"y":1},{"x":1,"y":1},{"x":2,"y":1},{"x":3,"y":1},{"x":4,"y":1},{"x":5,"y":1},{"x":7,"y":1},{"x":8,"y":1},{"x":9,"y":1},{"x":10,"y":1},{"x":11,"y":1},{"x":12,"y":1},{"x":0,"y":2},{"x":1,"y":2},{"x":2,"y":2},{"x":3,"y":2},{"x":4,"y":2},{"x":5,"y":2},{"x":7,"y":2},{"x":8,"y":2},{"x":9,"y":2},{"x":10,"y":2},{"x":11,"y":2},{"x":12,"y":2},{"x":3,"y":3},{"x":4,"y":3},{"x":5,"y":3},{"x":7,"y":3},{"x":8,"y":3},{"x":9,"y":3},{"x":12.5,"y":3.5,"s":0.5}]})"
 
-const size_t MAXIMUM_MAP_DICTIONARY_SIZE = 0xbc0000;
-const size_t MAXIMUM_BUTTON_SCRIPT_SIZE = 0x1f00;
 const size_t BUTTON_COUNT = 43;
 
 const char *const MANUFACTURER_NAME = "stenokeyboards";

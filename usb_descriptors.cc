@@ -1,8 +1,8 @@
 //---------------------------------------------------------------------------
 
 #include "usb_descriptors.h"
+#include "class/hid/hid.h"
 #include <hardware/flash.h>
-
 #include <tusb.h>
 
 #include JAVELIN_BOARD_CONFIG
@@ -64,7 +64,7 @@ const uint8_t keyboardReportDescriptor[] = {
       // Keyboard
       HID_REPORT_ID(KEYBOARD_PAGE_REPORT_ID)
       HID_USAGE_PAGE(HID_USAGE_PAGE_KEYBOARD),
-      
+
       // 1 input byte. Bitmap of modifiers.
       HID_USAGE_MIN(224),
       HID_USAGE_MAX(231),
@@ -78,14 +78,14 @@ const uint8_t keyboardReportDescriptor[] = {
       HID_USAGE_MIN(0),
       HID_USAGE_MAX(103),
       HID_REPORT_COUNT(104),
-      HID_REPORT_SIZE(1),
+      // HID_REPORT_SIZE(1),
       HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),
 
       // 2 input bytes. Keyboard page array.
-      HID_USAGE_MIN(0x68),
-      HID_USAGE_MAX(0x9f),
-      HID_LOGICAL_MIN(0x68),
-      HID_LOGICAL_MAX_N(0x9f, 2),
+      HID_USAGE_MIN(0x00),
+      HID_USAGE_MAX(0xff),
+      HID_LOGICAL_MIN(0x00),
+      HID_LOGICAL_MAX_N(0xff, 2),
       HID_REPORT_COUNT(2),
       HID_REPORT_SIZE(8),
       HID_INPUT(HID_DATA | HID_ARRAY | HID_ABSOLUTE),
@@ -113,34 +113,73 @@ const uint8_t keyboardReportDescriptor[] = {
     HID_USAGE(HID_USAGE_CONSUMER_CONTROL),
     HID_COLLECTION(HID_COLLECTION_APPLICATION),
 
-    // 8 input bytes. Consumer Page
+    // 8 input values. Consumer Page
       HID_REPORT_ID(CONSUMER_PAGE_REPORT_ID)
       HID_USAGE_PAGE(HID_USAGE_PAGE_CONSUMER),
-      HID_USAGE_MIN(0xb0),
-      HID_USAGE_MAX(0xff),
+      HID_USAGE_MIN(0),
+      HID_USAGE_MAX_N(0x7fff, 2),
       HID_LOGICAL_MIN(0),
-      HID_LOGICAL_MAX(1),
-      HID_REPORT_COUNT(64),
-      HID_REPORT_SIZE(1),
-      HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),
+      HID_LOGICAL_MAX_N(0x7fff, 2),
+      HID_REPORT_COUNT(8),
+      HID_REPORT_SIZE(16),
+      HID_INPUT(HID_DATA | HID_ARRAY | HID_ABSOLUTE),
 
+    HID_COLLECTION_END,
+
+    // --------------------------
+
+    HID_USAGE_PAGE(HID_USAGE_PAGE_DESKTOP),
+    HID_USAGE(HID_USAGE_DESKTOP_MOUSE),
+    HID_COLLECTION(HID_COLLECTION_APPLICATION),
+
+      HID_REPORT_ID(MOUSE_PAGE_REPORT_ID)
+      HID_USAGE_PAGE(HID_USAGE_DESKTOP_POINTER),
+      HID_COLLECTION(HID_COLLECTION_PHYSICAL),
+
+        HID_USAGE_PAGE(HID_USAGE_PAGE_BUTTON),
+        HID_USAGE_MIN(1),
+        HID_USAGE_MAX(0x20),
+        HID_LOGICAL_MIN(0),
+        HID_LOGICAL_MAX(1),
+        HID_REPORT_COUNT(32),
+        HID_REPORT_SIZE(1),
+        HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),
+
+        HID_USAGE_PAGE(HID_USAGE_PAGE_DESKTOP),
+        HID_USAGE(HID_USAGE_DESKTOP_X),
+        HID_USAGE(HID_USAGE_DESKTOP_Y),
+        HID_USAGE(HID_USAGE_DESKTOP_WHEEL),
+        HID_LOGICAL_MIN_N(-32768, 2),
+        HID_LOGICAL_MAX_N(32767, 2),
+        HID_REPORT_SIZE(16),
+        HID_REPORT_COUNT(3),
+        HID_INPUT(HID_DATA | HID_VARIABLE | HID_RELATIVE),
+
+        HID_USAGE_PAGE(HID_USAGE_PAGE_CONSUMER),
+        HID_USAGE_N(HID_USAGE_CONSUMER_AC_PAN, 2),
+        HID_REPORT_COUNT(1),
+        HID_INPUT(HID_DATA | HID_VARIABLE | HID_RELATIVE),
+
+      HID_COLLECTION_END,
     HID_COLLECTION_END,
 };
 
+
+
 const uint8_t consoleReportDescriptor[] = {
     // Console
-    0x06, 0x31, 0xFF, // HID_USAGE_PAGE(0xff31)
-    HID_USAGE(0x0074),
+    0x06, 0x4a, 0x4c, // HID_USAGE_PAGE("JL")
+    HID_USAGE(0x0001),
     HID_COLLECTION(HID_COLLECTION_APPLICATION),
     // Send
-      HID_USAGE(0x75),
+      HID_USAGE(2),
       HID_LOGICAL_MIN(0),
       HID_LOGICAL_MAX(255),
       HID_REPORT_COUNT(64),
       HID_REPORT_SIZE(8),
       HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),
     // Receive
-      HID_USAGE(0x76),
+      HID_USAGE(3),
       HID_LOGICAL_MIN(0),
       HID_LOGICAL_MAX(255),
       HID_REPORT_COUNT(64),
@@ -190,21 +229,8 @@ extern "C" const uint8_t *tud_hid_descriptor_report_cb(uint8_t instance) {
 
 #define CONFIG_TOTAL_LEN                                                       \
   (TUD_CONFIG_DESC_LEN + 2 * TUD_HID_DESC_LEN + TUD_HID_INOUT_DESC_LEN +       \
-   TUD_CDC_DESC_LEN)
+   TUD_CDC_DESC_LEN + TUD_MIDI_DESC_LEN)
 
-#if CFG_TUSB_MCU == OPT_MCU_LPC175X_6X ||                                      \
-    CFG_TUSB_MCU == OPT_MCU_LPC177X_8X || CFG_TUSB_MCU == OPT_MCU_LPC40XX
-// LPC 17xx and 40xx endpoint type (bulk/interrupt/iso) are fixed by its number
-// 1 Interrupt, 2 Bulk, 3 Iso, 4 Interrupt, 5 Bulk etc ...
-// #define EPNUM_KEYBOARD 0x81
-
-// #define EPNUM_CONSOLE_OUT 0x04
-// #define EPNUM_CONSOLE_IN 0x84
-
-// #define EPNUM_CDC_NOTIF 0x87
-// #define EPNUM_CDC_OUT 0x08
-// #define EPNUM_CDC_IN 0x88
-#else
 #define EPNUM_KEYBOARD 0x81
 
 #define EPNUM_PLOVER_HID 0x82
@@ -215,7 +241,9 @@ extern "C" const uint8_t *tud_hid_descriptor_report_cb(uint8_t instance) {
 #define EPNUM_CDC_NOTIF 0x84
 #define EPNUM_CDC_OUT 0x05
 #define EPNUM_CDC_IN 0x85
-#endif
+
+#define EPNUM_MIDI_OUT 0x06
+#define EPNUM_MIDI_IN 0x86
 
 const uint8_t MAIN_CONFIGURATION_DESCRIPTOR[] = {
     // Config number, interface count, string index, total length, attribute,
@@ -226,7 +254,7 @@ const uint8_t MAIN_CONFIGURATION_DESCRIPTOR[] = {
 
     // Interface number, string index, protocol, report descriptor len, EP In
     // address, size & polling interval
-    TUD_HID_DESCRIPTOR(ITF_NUM_KEYBOARD, 0, HID_ITF_PROTOCOL_KEYBOARD,
+    TUD_HID_DESCRIPTOR(ITF_NUM_KEYBOARD, 0, HID_ITF_PROTOCOL_NONE,
                        sizeof(keyboardReportDescriptor), EPNUM_KEYBOARD,
                        CFG_KEYBOARD_BUFSIZE, 1),
 
@@ -245,6 +273,9 @@ const uint8_t MAIN_CONFIGURATION_DESCRIPTOR[] = {
 
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 4, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT,
                        EPNUM_CDC_IN, 64),
+
+    // Interface number, string index, EP Out & EP In address, EP size
+    TUD_MIDI_DESCRIPTOR(ITF_NUM_MIDI, 0, EPNUM_MIDI_OUT, EPNUM_MIDI_IN, 64),
 };
 
 // Invoked when received GET CONFIGURATION DESCRIPTOR
@@ -282,7 +313,7 @@ extern "C" const uint16_t *tud_descriptor_string_cb(uint8_t index,
 
   case 3: {
     uint8_t id[8];
-    uint32_t interrupts = save_and_disable_interrupts();
+    const uint32_t interrupts = save_and_disable_interrupts();
     flash_get_unique_id(id);
     restore_interrupts(interrupts);
     for (size_t i = 0; i < 8; ++i) {
