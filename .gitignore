@@ -1,2 +1,16 @@
 build
 .*
+__pycache__/
+*.py[cod]
+
+# CMake and Pico SDK outputs from historical in-source builds.
+/CMakeCache.txt
+/CMakeFiles/
+/Makefile
+/cmake_install.cmake
+/_deps/
+/generated/
+/pico_flash_region.ld
+/pico_*.pio.h
+/pioasm/
+/pioasm-install/

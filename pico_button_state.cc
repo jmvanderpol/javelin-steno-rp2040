@@ -89,6 +89,12 @@ PicoButtonState PicoButtonState::instance;
 //---------------------------------------------------------------------------
 
 void PicoButtonState::Initialize() {
+#if defined(BOOTSEL_BUTTON_PIN)
+  gpio_init(BOOTSEL_BUTTON_PIN);
+  gpio_set_dir(BOOTSEL_BUTTON_PIN, GPIO_IN);
+  gpio_pull_up(BOOTSEL_BUTTON_PIN);
+#endif
+
 #if JAVELIN_BUTTON_MATRIX
 #if JAVELIN_SPLIT
 #if !defined(JAVELIN_SPLIT_IS_LEFT)
@@ -165,6 +171,10 @@ void PicoButtonState::Initialize() {
 #if defined(BOOTSEL_BUTTON_INDEX)
 
 bool __no_inline_not_in_flash_func(PicoButtonState::IsBootSelButtonPressed)() {
+#if defined(BOOTSEL_BUTTON_PIN)
+  // Some boards expose their boot button on a regular, active-low GPIO.
+  return !gpio_get(BOOTSEL_BUTTON_PIN);
+#else
   // Do not read bootsel within an interrupt, as disabling flash can cause
   // things to blow up if the second CPU is active.
   if (instance.isInInterrupt) {
@@ -207,6 +217,7 @@ bool __no_inline_not_in_flash_func(PicoButtonState::IsBootSelButtonPressed)() {
   restore_interrupts(flags);
   instance.lastBootSelButtonState = buttonState;
   return buttonState;
+#endif
 }
 #endif
 

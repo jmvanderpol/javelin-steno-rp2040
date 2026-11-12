@@ -1,0 +1,13 @@
+{
+  "javelin": {
+    "repository": "https://github.com/jthlim/javelin-steno.git",
+    "revision": "7efd1e13a74f00ba4d2e793198546e6dc83c7fbe",
+    "path": ".dependencies/javelin-steno-upstream",
+    "bindings_upstream_revision": "3edeb9c86e07239247fba74013b8808a5e1c611b"
+  },
+  "pico-sdk": {
+    "repository": "https://github.com/raspberrypi/pico-sdk.git",
+    "revision": "a1438dff1d38bd9c65dbd693f0e5db4b9ae91779",
+    "version": "2.2.0"
+  }
+}

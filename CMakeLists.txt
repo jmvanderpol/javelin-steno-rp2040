@@ -8,6 +8,26 @@ if ("${JAVELIN_BOARD}" STREQUAL "")
   message(FATAL_ERROR, "Target board (e.g. 'uni_v4') must be specified")
 endif()
 
+if (JAVELIN_BOARD STREQUAL "uni_v2_kb2040")
+  if (DEFINED PICO_PLATFORM AND NOT PICO_PLATFORM STREQUAL "rp2040")
+    message(FATAL_ERROR "uni_v2_kb2040 requires PICO_PLATFORM=rp2040")
+  endif()
+  if (DEFINED PICO_BOARD AND NOT PICO_BOARD STREQUAL "adafruit_kb2040")
+    message(FATAL_ERROR "uni_v2_kb2040 requires PICO_BOARD=adafruit_kb2040")
+  endif()
+  set(PICO_BOARD adafruit_kb2040 CACHE STRING "Pico SDK board" FORCE)
+  if (DEFINED PICO_FLASH_SIZE_BYTES)
+    math(EXPR JAVELIN_REQUESTED_FLASH_SIZE "${PICO_FLASH_SIZE_BYTES}")
+    if (NOT JAVELIN_REQUESTED_FLASH_SIZE EQUAL 8388608)
+      message(FATAL_ERROR "uni_v2_kb2040 requires PICO_FLASH_SIZE_BYTES=8388608 (8 MiB)")
+    endif()
+  endif()
+  set(PICO_FLASH_SIZE_BYTES 8388608 CACHE STRING "Flash capacity in bytes" FORCE)
+  set(JAVELIN_FLASH_SIZE_BYTES 8388608)
+else()
+  set(JAVELIN_FLASH_SIZE_BYTES 0x1000000)
+endif()
+
 add_definitions(
   -O2 -g
   -ffunction-sections -fdata-sections
@@ -19,16 +39,21 @@ add_definitions(
   -DJAVELIN_THREADS=1
   -DJAVELIN_SPLIT_VERSION_INCREMENT=3
   -DNDEBUG=1
-  -DPICO_FLASH_SIZE_BYTES=0x1000000
+  -DPICO_FLASH_SIZE_BYTES=${JAVELIN_FLASH_SIZE_BYTES}
   -DPICO_FLASH_SPI_CLKDIV=4
   -DPICO_MALLOC_PANIC=0
   -DPICO_NO_FPGA_CHECK=1
   -DPICO_XOSC_STARTUP_DELAY_MULTIPLIER=64
   -DPICO_PANIC_FUNCTION=0
 )
-
 set(PICO_DEFAULT_THREAD_LOCAL_IMPL none)
-include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+if (NOT PICO_SDK_PATH AND NOT DEFINED ENV{PICO_SDK_PATH})
+  set(PICO_SDK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/pico-sdk" CACHE PATH "Pico SDK path")
+endif()
+if (NOT PICO_SDK_PATH)
+  set(PICO_SDK_PATH "$ENV{PICO_SDK_PATH}")
+endif()
+include("${PICO_SDK_PATH}/external/pico_sdk_import.cmake")
 
 if (PICO_PLATFORM STREQUAL "rp2040")
   add_definitions(
@@ -54,11 +79,19 @@ endif()
 project(${NAME} C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--print-memory-usage")
 
 pico_sdk_init()
 
 add_executable(${NAME})
+
+if (JAVELIN_BOARD STREQUAL "uni_v2_kb2040")
+  # The initial data image stores its config block immediately after this region.
+  set(JAVELIN_FLASH_LIMIT_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/config/uni_v2_kb2040.ld")
+  target_link_options(${NAME} PRIVATE "LINKER:-T,${JAVELIN_FLASH_LIMIT_SCRIPT}")
+  set_property(TARGET ${NAME} APPEND PROPERTY LINK_DEPENDS "${JAVELIN_FLASH_LIMIT_SCRIPT}")
+endif()
 
 pico_generate_pio_header(${NAME} ${CMAKE_CURRENT_LIST_DIR}/pico_split_5.pio)
 pico_generate_pio_header(${NAME} ${CMAKE_CURRENT_LIST_DIR}/pico_split_8.pio)
