@@ -219,6 +219,66 @@ use `set_host_layout us` or `set_host_layout us_macos` in the console. US macOS
 is selected again on restart. Explicit shortcuts in dictionaries retain their
 original modifiers; host selection does not rewrite Ctrl shortcuts to Command.
 
+### Repeatable hardware smoke tests
+
+`tools/hardware_smoke_test.py` checks a connected Uni v2 + KB2040 without
+flashing it. It discovers USB ID `9000:400d` rather than assuming a stable
+`/dev/cu.usbmodem*` name. Close web-tools/terminal connections to the device
+before running it. Install its host dependency with:
+
+```sh
+python3 -m pip install -r tools/requirements-hardware-tests.txt
+```
+
+Run the three checks in order:
+
+1. `python3 tools/hardware_smoke_test.py health` opens the serial console using
+   `start_javelin_console`, verifies a unique hello response, and checks the
+   board configuration, button count, embedded mode, US macOS host layout,
+   dictionary capacity and contents, and `TEFT` -> `test` lookup. Commands have
+   timeouts and tagged responses so asynchronous events cannot look like a pass.
+2. Open a **blank editor document**, then run
+   `python3 tools/hardware_smoke_test.py typing --ready`. Refocus that document
+   during the 10-second countdown. A RAM-only script taps a distinctive marker
+   without Enter or modifiers. The script does not replace the saved layout.
+   The test checks that keyboard HID reports increase, but remains pending until
+   you confirm the exact visible text:
+
+   ```sh
+   python3 tools/hardware_smoke_test.py confirm-typing \
+     --output build/hardware-tests/<typing-run-directory> \
+     --observed-text javelin-usb-test-<printed-suffix>
+   ```
+
+3. With the blank editor still available, run
+   `python3 tools/hardware_smoke_test.py keys --ready`. After the countdown,
+   follow the printed prompts: press/release top-left S, middle-left S, and
+   leftmost thumb `#`, then chord T-left + E + F-right + T-right (`TEFT`).
+   The chord positions are top row 2/7/10 and thumb row 4, counted left to right.
+   The test requires correct button indices, release events, full simultaneous
+   chord state, and a paper-tape event translating `TEFT` to `test`.
+   Physical presses can type into the focused application. Use `--all-buttons`
+   for all 28 switches; BOOT is deliberately excluded from physical testing.
+
+Each run saves `report.json` and `serial.jsonl` under a new timestamped
+`build/hardware-tests/` directory. Reports include firmware information,
+responses, event frames, timeouts, and individual assertions. `--output` selects
+a different new directory. `--port` can select an identified matching board when
+multiple devices exist. Exit codes are 0 for a pass, 1 for failure, and 2 for a
+typing test awaiting visual confirmation. A report-count increase alone never
+claims successful host typing.
+
+For slower guided tests, use `--key-seconds 60 --chord-seconds 60`.
+`--buttons 0 --chord-seconds 0` tests one switch; `--chord-only` tests the known
+chord. The tool enables temporary button/paper-tape event streams and disables
+those streams on exit, closes the port, and writes no flash data. A reset returns
+runtime settings to the saved configuration. Protocol/parser tests run without
+accessing hardware:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_hardware_smoke_test.py' -v
+```
+
 ## Using javelin-steno-pico with your own hardware.
 
 This process involves uploading all of the data to the keyboard, then
