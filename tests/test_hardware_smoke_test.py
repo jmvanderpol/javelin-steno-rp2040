@@ -155,6 +155,20 @@ class HardwareTests(unittest.TestCase):
                 self.assertEqual(hw.confirm(directory, 'test'), 0)
             self.assertEqual(json.loads(path.read_text())['status'], 'passed')
 
+    def test_lapwing_health_requires_lapwing_dictionaries(self):
+        from unittest.mock import Mock
+        values = ['Configuration: uni_v2_kb2040', '29', 'embedded', 'us_macos',
+                  '0x3c0000', 'lapwing-base.json lapwing-commands.json', '{t: test}']
+        console, recorder = Mock(), Mock()
+        recorder.report = {'checks': {}}
+        console.command.side_effect = values
+        with redirect_stdout(io.StringIO()):
+            hw.health(console, recorder, 'lapwing')
+        self.assertTrue(all(recorder.report['checks'].values()))
+        console.command.side_effect = values[:5] + ['main.json commands.json', values[-1]]
+        with self.assertRaisesRegex(hw.TestFailure, 'main_dictionary'):
+            hw.health(console, recorder, 'lapwing')
+
 
 if __name__ == '__main__':
     unittest.main()

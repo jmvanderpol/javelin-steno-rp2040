@@ -120,6 +120,54 @@ class ImageBuilderTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Stroke masks exceed'):
             builder.prepare_dictionaries(image)
 
+    def lapwing_fixture(self):
+        image = self.modern_fixture()
+        base = builder.DICTIONARY
+        names = builder.PROFILE_NAMES['lapwing']
+        image.put(base + 4, struct.pack('<H', len(names)))
+        for index, name in enumerate(names):
+            addr = base + 0x800 + index * 0x20
+            image.word(base + 36 + index * 4, addr)
+            native = {v: k for k, v in builder.NATIVE_NAMES.items()}.get(name)
+            if native:
+                image.put(addr, bytes([1, 0, native, 0]))
+            else:
+                name_addr = base + 0xc00 + index * 0x80
+                image.put(name_addr, name.encode() + b'\0')
+                image.put(addr, bytes([1, 1, 0, 0]) + struct.pack(
+                    '<4I', name_addr, 1, base + 0x400, base + 0x100))
+        return image
+
+    def test_lapwing_beginner_defaults_and_validation(self):
+        image = self.lapwing_fixture()
+        report, _ = builder.prepare_dictionaries(image, 'lapwing')
+        self.assertEqual([r['name'] for r in report if not r['enabled']],
+                         ['jeff-phrasing', 'lapwing-semi-modal-movement.json',
+                          'lapwing-uk-additions.json'])
+        before = bytes(image.data)
+        self.assertEqual(builder.prepare_dictionaries(image, 'lapwing', apply_defaults=False)[0], report)
+        self.assertEqual(bytes(image.data), before)
+        first = image.u32(builder.DICTIONARY + 36)
+        image.put(first, b'\1')
+        with self.assertRaisesRegex(ValueError, 'Incorrect default'):
+            builder.prepare_dictionaries(image, 'lapwing', apply_defaults=False)
+
+    def test_dictionary_priority_and_profile_mismatch_rejected(self):
+        image = self.lapwing_fixture()
+        base = builder.DICTIONARY
+        a, b = image.u32(base + 40), image.u32(base + 44)
+        image.word(base + 40, b)
+        image.word(base + 44, a)
+        with self.assertRaisesRegex(ValueError, 'order or names'):
+            builder.prepare_dictionaries(image, 'lapwing')
+        with self.assertRaisesRegex(ValueError, 'order or names'):
+            builder.prepare_dictionaries(self.modern_fixture(), 'lapwing')
+
+    def test_lapwing_rejects_an_unpinned_source(self):
+        with self.assertRaisesRegex(ValueError, 'Source hash mismatch'):
+            builder.build(self.path, self.path, Path(self.directory.name) / 'out', 'lapwing')
+        self.assertFalse((Path(self.directory.name) / 'out').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

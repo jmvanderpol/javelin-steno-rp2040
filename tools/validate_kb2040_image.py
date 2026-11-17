@@ -14,7 +14,7 @@ import zlib
 
 from build_kb2040_image import (BASE, CONFIG, DICTIONARY, END, HARDWARE_SHA256,
                                 HOSTS, KEYS, SCRIPT, STORAGE, SYSTEM, USER,
-                                Image, dictionary_records, read_uf2, require)
+                                Image, dictionary_records, prepare_dictionaries, read_uf2, require)
 
 
 def check_maps(image):
@@ -29,6 +29,9 @@ def check_maps(image):
         total = 0
         for length in range(1, maximum + 1):
             mask, first_mask, last_mask, data, offsets = struct.unpack('<5I', image.get(rows + 20 * (length - 1), 20))
+            if mask == 0:
+                require(first_mask == last_mask == 0, 'Invalid empty row')
+                continue
             size = mask + 1
             require(mask > 0 and size % 128 == 0 and (mask & size) == 0, 'Bad hash table size')
             raw_blocks = [struct.unpack('<5I', image.get(offsets + i * 20, 20)) for i in range(size // 128)]
@@ -249,6 +252,38 @@ def arm_checks(arm, image, samples):
         arm.call('_ZNK11StenoStroke8ToStringEPc', 0x20031200, 0x20031300)
         require(arm.string(0x20031300) == outline, f'ARM stroke roundtrip failed: {outline}')
 
+    # Golden beginner strokes use the actual parser and enabled dictionary order,
+    # including the firmware-native Emily Symbols implementation in Lapwing.
+    records, _ = dictionary_records(image)
+    for definition, _, _ in records:
+        if definition not in objects:
+            objects[definition] = arm.call('_ZNK25StenoDictionaryDefinition6CreateEv', definition)
+        require(objects[definition], 'Dictionary factory rejected a source definition')
+    golden = [(b'KAT', b'cat'), (b'TEFT', b'test')]
+    if any(kind == 5 for _, _, kind in records):
+        golden.append((b'SKWH-R', b'{}.{}'))
+    for outline, expected in golden:
+        arm.mu.mem_write(0x20031000, outline + b'\0')
+        arm.call('_ZN11StenoStroke3SetEPKc', 0x20031200, 0x20031000)
+        stroke = arm.word(0x20031200)
+        words = struct.pack('<I', stroke)
+        arm.mu.mem_write(0x20031000, words)
+        arm.mu.mem_write(0x20031100, struct.pack('<6I', 0x20031000, 1, stroke,
+                                               stroke, stroke, zlib.crc32(words)))
+        translation = None
+        for definition, _, kind in records:
+            if not image.get(definition, 1)[0]:
+                continue
+            cls = {0: '25StenoCompactMapDictionary', 3: '26StenoJeffNumbersDictionary',
+                   5: '27StenoEmilySymbolsDictionary'}[kind]
+            result = arm.call('_ZNK' + cls + '6LookupERK21StenoDictionaryLookup',
+                              objects[definition], 0x20031100)
+            if result:
+                translation = arm.string(result)
+                break
+        require(translation == expected, f'Golden outline failed: {outline}: {translation}')
+    print(f'ARM enabled-priority golden strokes passed: {len(golden)}', flush=True)
+
     arm.call('_ZN11HostLayouts7SetDataERKS_', HOSTS)
     active = arm.word(arm.symbols['_ZN11HostLayouts12activeLayoutE'])
     require(arm.string(active) == b'us_macos', 'Wrong default host layout')
@@ -307,7 +342,7 @@ def arm_checks(arm, image, samples):
     stack = arm.types['Script'][1]
     require(arm.word(obj + stack['stackTop']) == obj + stack['stack'], 'VM stack did not balance')
     print('ARM VM: all 28 presses/releases, chord and boot command passed', flush=True)
-    return {'dictionary_lookups': len(samples), 'button_press_release_pairs': 28,
+    return {'dictionary_lookups': len(samples), 'golden_strokes': len(golden), 'button_press_release_pairs': 28,
             'chord': 'passed', 'boot_command': 'launch_bootloader',
             'default_host_layout': 'us_macos', 'stroke_roundtrips': 7,
             'orthography_suffix_cases': len(suffix_cases)}
@@ -316,6 +351,7 @@ def arm_checks(arm, image, samples):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image', required=True)
+    parser.add_argument('--dictionary-set', choices=['plover', 'lapwing'], default='plover')
     parser.add_argument('--elf', required=True)
     parser.add_argument('--report', default='build/uni_v2_kb2040_upstream_complete/validation.json')
     args = parser.parse_args()
@@ -331,6 +367,9 @@ def main():
         require(hashlib.sha256(path.read_bytes()).hexdigest() == HARDWARE_SHA256, 'Wrong hardware firmware')
     require(set(a for a in blocks if a >= CONFIG) == set(range(CONFIG, END, 256)), 'Incomplete initialization data')
     require(image.get(USER, END - USER) == b'\xff' * (END - USER), 'User region is not erased')
+    profile, _ = prepare_dictionaries(image, args.dictionary_set, apply_defaults=False)
+    require(image.get(CONFIG + 4, 1) == bytes([args.dictionary_set == 'plover']),
+            'Incorrect native modifier configuration')
     report, samples = check_maps(image)
     print('Exhaustive dictionary checks:', report, flush=True)
     crc, size = struct.unpack('<II', image.get(STORAGE, 8))
@@ -341,7 +380,7 @@ def main():
     layout = json.loads(bz2.decompress(packed[1:]))
     require(len(layout['layers'][0]['keys']) == 29, 'Wrong editable layout key count')
     arm_report = arm_checks(ArmFirmware(args.elf, blocks), image, samples)
-    result = {'image_sha256': digest, 'dictionary_checks': report, 'arm_runtime_checks': arm_report,
+    result = {'dictionary_set': args.dictionary_set, 'dictionaries': profile, 'image_sha256': digest, 'dictionary_checks': report, 'arm_runtime_checks': arm_report,
               'hardware_validation': 'not performed; this is selected-function emulation, not an RP2040 boot',
               'emulator_stubs': ['heap allocator', 'ROM memcpy/memset', 'DMA CRC32',
                                  'orthography cache locks', 'steno output callbacks', 'boot console dispatch']}

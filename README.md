@@ -219,6 +219,77 @@ use `set_host_layout us` or `set_host_layout us_macos` in the console. US macOS
 is selected again on restart. Explicit shortcuts in dictionaries retain their
 original modifiers; host selection does not rewrite Ctrl shortcuts to Command.
 
+### Building a complete Lapwing beginner image
+
+This profile targets the **Uni v2 PCB with an Adafruit KB2040 (8 MiB)** tested
+above. It is not a stock Uni v3 target. Hardware firmware, PCB pin mapping,
+28-key steno script, English orthography/word list, and US macOS/US host layouts
+remain the same. US macOS is the startup default.
+
+The build uses the compiled dictionaries in the
+[official Javelin Lapwing download](https://lim.au/assets/data/uni_v4_lapwing-2026-11-11.uf2.zip),
+not Plover's Python dictionary plugins. The source UF2 is pinned to SHA-256
+`e93c1089aa50fa1fb27df28955f5fe2276f2520cbfece86c781f82aa9baa320c`.
+This is a dated Javelin-compatible Lapwing snapshot, not a build of the latest
+[upstream JSON dictionaries](https://github.com/aerickt/plover-lapwing-aio/tree/main/plover_lapwing/dictionaries).
+The [Lapwing beginner book](https://lapwing.aerick.ca/) describes the theory.
+
+The profile preserves upstream dictionary priority. Enabled dictionaries are
+Abby left-hand modifiers, Emily modifiers, native Emily Symbols, Javelin
+additions, Lapwing commands, numbers, proper nouns, and base (114,885 entries).
+Jeff phrasing, semi-modal movement, and UK additions remain included but are
+**disabled by default** to keep the initial US learning setup simpler. Native
+Jeff modifiers are disabled because Lapwing supplies its own modifier mappings.
+Plover main/commands and native Jeff numbers are replaced. Stroke repeat stays
+disabled as in the existing KB2040 initialization profile.
+
+Dictionary data occupies 2,927,840 bytes, leaving 1,003,520 aligned bytes for
+assets and a separate 256 KiB user dictionary. All pointers stay within 8 MiB.
+Host layouts do not translate explicit shortcuts: some Lapwing movement/deletion
+commands still use upstream Control combinations and may need Option/Command
+customizations on macOS. Ordinary character typing uses US macOS normally.
+
+To reproduce the validated hardware binary with GCC 14.3.Rel1, the locked core
+and Pico SDK, use the original build date (the core embeds `__DATE__`):
+
+```sh
+cmake -S . -B build/uni_v2_kb2040_lapwing_hw \
+  -DJAVELIN_BOARD=uni_v2_kb2040 -DPICO_BOARD=adafruit_kb2040 \
+  -DPICO_PLATFORM=rp2040 \
+  -DPICO_TOOLCHAIN_PATH=/Applications/ArmGNUToolchain/14.3.rel1/arm-none-eabi
+env SOURCE_DATE_EPOCH=1794528000 cmake --build build/uni_v2_kb2040_lapwing_hw --parallel
+mkdir -p build/data-sources
+curl -L --fail -o build/data-sources/uni_v4_lapwing-2026-11-11.uf2.zip \
+  https://lim.au/assets/data/uni_v4_lapwing-2026-11-11.uf2.zip
+python3 tools/build_kb2040_image.py --dictionary-set lapwing \
+  --source build/data-sources/uni_v4_lapwing-2026-11-11.uf2.zip \
+  --firmware build/uni_v2_kb2040_lapwing_hw/javelin-steno-pico.uf2
+build/data-tools-venv/bin/python -u tools/validate_kb2040_image.py \
+  --dictionary-set lapwing \
+  --image build/uni_v2_kb2040_lapwing_complete/uni_v2_kb2040_lapwing_initial_full.uf2 \
+  --elf build/uni_v2_kb2040_lapwing_hw/javelin-steno-pico.elf \
+  --report build/uni_v2_kb2040_lapwing_complete/validation.json
+```
+
+Install the validator dependencies using the instructions above. Adjust the
+compiler installation path on other machines; the hardware hash gate will
+reject binaries that differ. Use a fresh CMake build directory if changing the
+toolchain or build date.
+
+The full image is
+`build/uni_v2_kb2040_lapwing_complete/uni_v2_kb2040_lapwing_initial_full.uf2`.
+The same folder contains data-only UF2, editable layout, manifest, and validation
+report. **Flashing either initialization image resets configuration, scripts,
+assets, and all user dictionary entries.** Back up entries before installing.
+Nothing in the build process flashes the device.
+
+Validation checks all 151,228 map entries (including disabled dictionaries),
+1,469 sampled ARM map lookups, enabled dictionary priority with `KAT` -> `cat`,
+`TEFT` -> `test`, and native Emily Symbols `SKWH-R` -> `{}.{}` (the source selects glue mode), plus the shared
+host/system/button checks. This does not replace physical testing. After
+installing, run each smoke test below with `--dictionary-set lapwing`; the same
+TEFT chord still produces `test`. Plover remains the builder/test CLI default.
+
 ### Repeatable hardware smoke tests
 
 `tools/hardware_smoke_test.py` checks a connected Uni v2 + KB2040 without

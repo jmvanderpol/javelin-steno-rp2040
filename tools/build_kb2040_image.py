@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Adapt one hash-pinned official Plover image to the pinned November 2026 core.
+"""Adapt a hash-pinned official Plover or Lapwing image to the pinned November 2026 core.
 
 This is an initial-install image builder, not a general dictionary compiler.
 It deliberately erases editable scripts, assets and the user dictionary.
@@ -29,6 +29,21 @@ CORE = '7efd1e13a74f00ba4d2e793198546e6dc83c7fbe'
 SOURCE_URL = 'https://lim.au/assets/data/uni_v4_plover-2026-11-11.uf2.zip'
 SOURCE_SHA256 = 'cd7eec7fa36b52df5d45b3e2d10ee248eafb836d65252248e4e5dc5d4459f33a'
 HARDWARE_SHA256 = '3365d1465fb4d81e7898b015fd59ff9aaafdf19468aa049562aecd1e2fb8a48c'
+
+LAPWING_SOURCE_URL = 'https://lim.au/assets/data/uni_v4_lapwing-2026-11-11.uf2.zip'
+LAPWING_SOURCE_SHA256 = 'e93c1089aa50fa1fb27df28955f5fe2276f2520cbfece86c781f82aa9baa320c'
+NATIVE_NAMES = {3: 'jeff-numbers', 4: 'jeff-phrasing', 5: 'emily-symbols'}
+PROFILE_NAMES = {
+    'plover': ['jeff-numbers', 'commands.json', 'main.json'],
+    'lapwing': ['jeff-phrasing', 'abby-left-hand-modifiers.json', 'emily-modifiers.json',
+                'emily-symbols', 'lapwing-javelin-additions.json',
+                'lapwing-semi-modal-movement.json', 'lapwing-commands.json',
+                'lapwing-numbers.json', 'lapwing-uk-additions.json',
+                'lapwing-proper-nouns.json', 'lapwing-base.json'],
+}
+LAPWING_DISABLED = {'jeff-phrasing', 'lapwing-semi-modal-movement.json',
+                    'lapwing-uk-additions.json'}
+
 
 # StenoKey enum values, in verified Uni PCB physical-button order.
 KEYS = [0, 2, 4, 6, 10, 12, 16, 18, 20, 22, 24,
@@ -110,7 +125,7 @@ class Image:
 def dictionary_records(image):
     require(image.get(DICTIONARY, 4) == b'JSC4', 'Wrong dictionary magic')
     count = struct.unpack('<H', image.get(DICTIONARY + 4, 2))[0]
-    require(count == 3, 'Unexpected pinned source dictionary count')
+    require(0 < count <= 32, 'Unexpected source dictionary count')
     text_size, text = struct.unpack('<II', image.get(DICTIONARY + 8, 8))
     end = text + text_size + 4
     require(DICTIONARY <= text < end <= USER, 'Dictionary text exceeds capacity')
@@ -119,29 +134,44 @@ def dictionary_records(image):
     for i in range(count):
         addr = image.u32(DICTIONARY + 36 + i * 4)
         enabled, maximum, kind, options = image.get(addr, 4)
-        require(enabled in (0, 1) and kind in (0, 3), 'Unsupported source dictionary type')
+        require(enabled in (0, 1) and kind in (0, *NATIVE_NAMES), 'Unsupported source dictionary type')
         records.append((addr, maximum, kind))
     return records, end
 
 
-def prepare_dictionaries(image):
-    """Validate modern map descriptors; the pinned core consumes them verbatim."""
+def prepare_dictionaries(image, dictionary_set='plover', *, apply_defaults=True):
+    """Validate the pinned profile and optionally install its beginner defaults."""
+    require(dictionary_set in PROFILE_NAMES, 'Unknown dictionary set')
     records, end = dictionary_records(image)
     report = []
     for addr, maximum, kind in records:
-        if kind == 3:  # Jeff numbers is implemented by the firmware itself.
-            report.append({'name': 'jeff-numbers', 'type': 'native'})
-            continue
-        name, mask, text, strokes = struct.unpack('<4I', image.get(addr + 4, 16))
-        name = image.string(name).decode()
-        require(name in ('commands.json', 'main.json'), 'Unexpected source map dictionary')
-        rows = [struct.unpack('<5I', image.get(strokes + i * 20, 20)) for i in range(maximum)]
-        for hash_mask, first_mask, last_mask, data, offsets in rows:
-            require(hash_mask > 0 and (hash_mask & (hash_mask + 1)) == 0, 'Unexpected hash table mask')
-            require(DICTIONARY <= data <= offsets < end, 'Invalid stroke-data pointers')
-            require(first_mask & ~mask == 0 and last_mask & ~mask == 0,
-                    'Stroke masks exceed dictionary mask')
-        report.append({'name': name, 'type': 'compact_map', 'maximum_outline_length': maximum})
+        if kind:
+            name = NATIVE_NAMES[kind]
+            item = {'name': name, 'type': 'native'}
+        else:
+            name_ptr, mask, text, strokes = struct.unpack('<4I', image.get(addr + 4, 16))
+            name = image.string(name_ptr).decode()
+            require(0 < maximum <= 32, 'Invalid maximum outline length')
+            require(DICTIONARY <= text < end, 'Invalid map text pointer')
+            rows = [struct.unpack('<5I', image.get(strokes + i * 20, 20)) for i in range(maximum)]
+            for hash_mask, first_mask, last_mask, data, offsets in rows:
+                if hash_mask == 0:
+                    require(first_mask == last_mask == 0, 'Nonempty row has no hash table')
+                    continue
+                require((hash_mask & (hash_mask + 1)) == 0, 'Unexpected hash table mask')
+                require(DICTIONARY <= data <= offsets < end, 'Invalid stroke-data pointers')
+                require(first_mask & ~mask == 0 and last_mask & ~mask == 0,
+                        'Stroke masks exceed dictionary mask')
+            item = {'name': name, 'type': 'compact_map', 'maximum_outline_length': maximum}
+        enabled = name not in LAPWING_DISABLED if dictionary_set == 'lapwing' else True
+        if apply_defaults:
+            image.put(addr, bytes([enabled]))
+        else:
+            require(image.get(addr, 1) == bytes([enabled]), f'Incorrect default for {name}')
+        item['enabled'] = enabled
+        report.append(item)
+    require([item['name'] for item in report] == PROFILE_NAMES[dictionary_set],
+            'Unexpected pinned source dictionary order or names')
     return report, end
 
 
@@ -236,16 +266,19 @@ def install_button_script(image):
     return script, layout
 
 
-def build(source, firmware, output):
+def build(source, firmware, output, dictionary_set='plover'):
+    require(dictionary_set in PROFILE_NAMES, 'Unknown dictionary set')
+    source_url, expected_hash = ((SOURCE_URL, SOURCE_SHA256) if dictionary_set == 'plover'
+                                 else (LAPWING_SOURCE_URL, LAPWING_SOURCE_SHA256))
     source_blocks, source_hash = read_uf2(source)
-    require(source_hash == SOURCE_SHA256, 'Source hash mismatch; this converter supports only the pinned official image')
+    require(source_hash == expected_hash, 'Source hash mismatch; this converter supports only the pinned official image')
     firmware_blocks, firmware_hash = read_uf2(firmware)
     require(firmware_hash == HARDWARE_SHA256,
             'Hardware hash mismatch; revalidate this converter before using a different firmware')
     require(all(BASE <= addr < addr + 256 <= CONFIG for addr in firmware_blocks),
             'Hardware firmware overlaps data')
     image = Image(source_blocks)
-    dictionaries, dictionary_end = prepare_dictionaries(image)
+    dictionaries, dictionary_end = prepare_dictionaries(image, dictionary_set)
     key_count = prepare_system(image)
     hosts = select_hosts(image)
     script, layout = install_button_script(image)
@@ -255,7 +288,7 @@ def build(source, firmware, output):
               13, 14, 15, 16, 17, 18, 19, 20, 21, 22] + [0] * 12 + [-1] * 26
     require(len(keymap) == 64, 'Invalid configuration keymap size')
     config = bytearray(96)
-    config[4] = 1  # Enable native Jeff modifiers.
+    config[4] = dictionary_set == 'plover'  # Lapwing supplies Abby/Emily modifiers.
     config[32:96] = struct.pack('<64b', *keymap)
     image.put(CONFIG, bytes(256))
     image.put(CONFIG, config)
@@ -266,8 +299,8 @@ def build(source, firmware, output):
     full_blocks = {**firmware_blocks, **data_blocks}
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    data_path = output / 'uni_v2_kb2040_plover_initial_data.uf2'
-    full_path = output / 'uni_v2_kb2040_plover_initial_full.uf2'
+    data_path = output / f'uni_v2_kb2040_{dictionary_set}_initial_data.uf2'
+    full_path = output / f'uni_v2_kb2040_{dictionary_set}_initial_full.uf2'
     write_uf2(data_path, data_blocks)
     write_uf2(full_path, full_blocks)
     (output / 'uni_v2_kb2040.javelin-layout').write_text(json.dumps(layout, indent=2) + '\n')
@@ -275,10 +308,10 @@ def build(source, firmware, output):
     manifest = {
         'purpose': 'initial installation; resets scripts, assets and user dictionary',
         'data_abi': 'modern map masks and 24-bit StrokeKey; no legacy conversion',
-        'source_url': SOURCE_URL, 'source_uf2_sha256': source_hash,
+        'dictionary_set': dictionary_set, 'source_url': source_url, 'source_uf2_sha256': source_hash,
         'hardware_uf2_sha256': firmware_hash, 'core_revision': CORE,
         'host_layouts': hosts, 'default_host_layout': hosts[0],
-        'dictionaries': dictionaries, 'native_jeff_modifiers': True,
+        'dictionaries': dictionaries, 'native_jeff_modifiers': dictionary_set == 'plover',
         'dictionary_start': hex(DICTIONARY), 'dictionary_end': hex(dictionary_end),
         'dictionary_limit': hex(USER), 'dictionary_bytes': dictionary_end - DICTIONARY,
         'available_asset_bytes': USER - clear_from,
@@ -294,14 +327,17 @@ def build(source, firmware, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--source', required=True, help='Pinned official Uni v4 Plover UF2 or ZIP')
+    parser.add_argument('--source', required=True, help='Pinned official Uni v4 UF2 or ZIP for the selected dictionary set')
     parser.add_argument('--firmware', required=True, help='Matching locally built KB2040 hardware UF2')
-    parser.add_argument('--output', default='build/uni_v2_kb2040_upstream_complete')
+    parser.add_argument('--dictionary-set', choices=sorted(PROFILE_NAMES), default='plover')
+    parser.add_argument('--output', help='Output directory (separate default for each dictionary set)')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     revision = subprocess.check_output(['git', '-C', str(root / 'javelin'), 'rev-parse', 'HEAD'], text=True).strip()
     require(revision == CORE, 'Wrong core revision; rebuild/revalidate the converter for this core')
-    result = build(args.source, args.firmware, args.output)
+    output = args.output or ('build/uni_v2_kb2040_upstream_complete' if args.dictionary_set == 'plover'
+                             else 'build/uni_v2_kb2040_lapwing_complete')
+    result = build(args.source, args.firmware, output, args.dictionary_set)
     print(json.dumps(result, indent=2))
 
 

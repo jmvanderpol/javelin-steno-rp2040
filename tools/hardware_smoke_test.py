@@ -227,7 +227,7 @@ def discover(port=None):
             'product': device.product, 'serial_number': device.serial_number}
 
 
-def health(console, recorder):
+def health(console, recorder, dictionary_set='plover'):
     commands = ['info', 'get_parameter button_count', 'get_parameter steno_mode',
                 'get_parameter host_layout', 'get_parameter maximum_dictionary_size',
                 'list_dictionaries', 'lookup_stroke TEFT']
@@ -239,10 +239,11 @@ def health(console, recorder):
         'embedded_mode': responses[commands[2]] == 'embedded',
         'us_macos_host': responses[commands[3]] == 'us_macos',
         'dictionary_capacity': int(responses[commands[4]], 0) == 0x3c0000,
-        'main_dictionary': 'main.json' in responses[commands[5]],
-        'commands_dictionary': 'commands.json' in responses[commands[5]],
+        'main_dictionary': ('lapwing-base.json' if dictionary_set == 'lapwing' else 'main.json') in responses[commands[5]],
+        'commands_dictionary': ('lapwing-commands.json' if dictionary_set == 'lapwing' else 'commands.json') in responses[commands[5]],
         'known_lookup': bool(re.search(r'\bt:\s*(?:"test"|test)\s*[,}]', responses[commands[6]])),
     }
+    recorder.report['dictionary_set'] = dictionary_set
     recorder.report['responses'] = responses
     recorder.report['checks'].update(checks)
     recorder.save()
@@ -390,6 +391,7 @@ def confirm(directory, observed):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('test', choices=['health', 'typing', 'keys', 'confirm-typing'])
+    parser.add_argument('--dictionary-set', choices=['plover', 'lapwing'], default='plover')
     parser.add_argument('--port', help='Must identify the expected 9000:400d board')
     parser.add_argument('--output', help='New directory for this run')
     parser.add_argument('--timeout', type=float, default=3)
@@ -428,7 +430,7 @@ def main():
         recorder.save()
         console = Console(device['port'], recorder, args.timeout)
         console.open()
-        info = health(console, recorder)
+        info = health(console, recorder, args.dictionary_set)
         if args.test == 'typing':
             typing(console, recorder, info, args.countdown)
         elif args.test == 'keys':
